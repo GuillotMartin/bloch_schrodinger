@@ -2,16 +2,22 @@ import numpy as np
 import xarray as xr
 from types import NoneType
 from typing import Union, Type
-import matplotlib.pyplot as plt
 from ipywidgets import interact, FloatSlider, IntSlider, HBox, VBox, Layout, interactive_output
 from IPython.display import display
-from matplotlib.axes import Axes
-from matplotlib.figure import Figure
 import cmcrameri.cm as cm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-import matplotlib.colors as colors
-import matplotlib
 from copy import deepcopy
+
+import matplotlib
+import matplotlib.colors as colors
+import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+from matplotlib.collections import QuadMesh
+from matplotlib.quiver import Quiver
+from matplotlib.contour import QuadContourSet
+
+
 
 font = {"family": "serif", "size": 12, "serif": "cmr10"}
 
@@ -21,7 +27,8 @@ matplotlib.rcParams["font.family"] = "STIXGeneral"
 
 
 def get_template(name:str):
-    """Return a pre-filled template made to be used with the 'plot_eigenvector' function.
+    """Return a pre-filled template made to be used with the 'plot_eigenvector' function. Includes the argument 'contourkwargs', 'pcolormeshkwargs', 
+    'cbarkwargs' and 'quiverkwargs' that are passed to the according matplotlib functions.
 
     Args:
         name (str): The name of the template, right now, 'amplitude', 'real', 'amplitude - log' and 'phase are implemented.
@@ -120,7 +127,22 @@ def plot_eigenvector(
     titles: list[list[str]],
     quivers:Union[NoneType, list[list[Union[NoneType, tuple[xr.DataArray]]]]] = None
     ):
-    
+    """The main function to plot eigenvectors in a interactive manner.
+
+    Args:
+        plots (list[list[xr.DataArray]]): A list of list of eigenvectors xr.DataArrays, each DataArray will be plotted in a separate subplot, 
+        in a grid-pattern determined by the structure of the list of lists.
+        potentials (list[list[xr.DataArray]]): The potentials to be plotted as contour for each plot.
+        templates (list[list[Union[str,dict]]]): A dictionnary containing all the instruction to define each subplot style. the templates can also be strings 
+        calling predefined templates, such as 'amplitude', 'phase', 'real' and more. see 'get_template' for more informations.
+        titles (list[list[str]]): The title for each subplot.
+        quivers (Union[NoneType, list[list[Union[NoneType, tuple[xr.DataArray]]]]], optional): An optional argument to overlay quiver plots on top of the eigenvectors. 
+        Each entry of the list of lists must either be None or contain a tuple of DataArrays (U,V,C), see the quiver function from matplotlib for more informations. 
+        Defaults to None.
+
+    Raises:
+        ValueError: Raise errors if the shapes are not consistent.
+    """
     n_rows = len(plots)
     n_cols = len(plots[0])
     if len(templates) != n_rows or len(potentials) != n_rows: raise ValueError("different shapes for plots and templates")
@@ -142,9 +164,22 @@ def plot_eigenvector(
             potential:xr.DataArray, 
             quiver:Union[NoneType, tuple[xr.DataArray]], 
             template:Union[str,dict], 
-            title
-        ):
-        
+            title:str
+        )-> tuple[Axes, dict, QuadMesh, QuadContourSet, Quiver, dict]:
+        """A function to create a single subplot
+
+        Args:
+            fig (Figure): the global figure object
+            ax (Axes): The ax in which to plot.
+            plot (xr.DataArray): The DataArray to plot as a heatmap.
+            potential (xr.DataArray): The Potential to plot as a contour plot.
+            quiver (Union[NoneType, tuple[xr.DataArray]]): The DataArray tuple to plot as a quiver.
+            template (Union[str,dict]): The template, either a string to call 'get_template' or a dictionary
+            title (str): The title of the subplot.
+
+        Returns:
+            tuple[Axes, dict, QuadMesh, QuadContourSet, Quiver, dict]: The axes, objects plotted and a template in the dictionary format
+        """
         slider_dims = [dim for dim in plot.dims if dim not in ['a1','a2','x','y']]
         sliders_ax = {}
         for dim in slider_dims:
@@ -290,17 +325,27 @@ def plot_eigenvector(
     out = interactive_output(update, sliders)
     # Display everything
     display(VBox(list(sliders.values()) + [out]))
-    
-    
+      
 def plot_bands(
         eigva:xr.DataArray,
         dim:str,
-        xmin = None, xmax = None,
-        ymin = None, ymax = None,
+        xmin:float = None, xmax:float = None,
+        ymin:float = None, ymax:float = None,
         figkw:dict = {}, 
         **linekw,
     ):
-    
+    """The main function to plot the eigenvalues in an interactive manner. Plot each eigenvalue as a function of the parameter dimension 'dim'.
+
+    Args:
+        eigva (xr.DataArray): The DataArray containing the eigenvalues, must have at least the 'band' dimension.
+        dim (str): The dimension to plot against.
+        xmin (float, optional): Like xmin from plt.plot. Defaults to None.
+        xmax (float, optional): Like xmax from plt.plot. Defaults to None.
+        ymin (float, optional): Like ymin from plt.plot. Defaults to None.
+        ymax (float, optional): Like ymax from plt.plot. Defaults to None.
+        figkw (dict, optional): A dictionnary passed to the plt.subplots function. Defaults to {}.
+        Additional parameters are passed as kwargs to plt.plot().
+    """
     slider_dims = [d for d in eigva.dims if d not in [dim, 'band']]
     sliders = {}
     for d in slider_dims:
