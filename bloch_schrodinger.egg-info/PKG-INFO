@@ -1,0 +1,73 @@
+Metadata-Version: 2.4
+Name: bloch_schrodinger
+Version: 0.1.0
+Summary: A solver for the 2D schrödinger equation.
+Home-page: https://github.com/me/myproject
+Author: Martin Guillot
+Author-email: guillotmartin@yahoo.com
+License: MIT
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.14
+Classifier: Programming Language :: Python :: Implementation :: CPython
+Classifier: Programming Language :: Python :: Implementation :: PyPy
+Requires-Python: >=3.14.0
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: xarray
+Requires-Dist: scipy
+Requires-Dist: numpy
+Requires-Dist: plotly
+Requires-Dist: ipywidgets
+Requires-Dist: IPython
+Requires-Dist: jupyter
+Requires-Dist: xarray_einstats
+Requires-Dist: anywidget
+Requires-Dist: dask
+Requires-Dist: pyparsing
+Requires-Dist: jupyter-bokeh
+Requires-Dist: matplotlib
+Requires-Dist: dask
+Requires-Dist: ipympl
+Requires-Dist: tqdm
+Provides-Extra: gpu-accel
+Requires-Dist: cupy; extra == "gpu-accel"
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: license
+Dynamic: license-file
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+
+# 2D Bloch-Schrödinger solver 
+
+This package provides the tools to solve the Bloch-Schrödinger equation in 2D. It contains simple potential construction tools and a main solver class.
+
+## Installation
+
+First download the repository and extract it where you want. Then, run in your python environment 
+
+`bash`
+pip install path\\to\\package\\bloch-schrodinger
+
+or 
+
+`bash`
+pip install -e path\\to\\package\\tightbinding
+
+if you want to be able to modify it in place.
+
+## Getting started
+
+Once you have installed the package, open in a jupyter viewer the [Getting Started](docs/GettingStarted.ipynb) notebook.
+
+
+
