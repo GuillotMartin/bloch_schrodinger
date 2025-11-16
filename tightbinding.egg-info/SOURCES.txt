@@ -1,8 +1,0 @@
-LICENSE
-README.md
-setup.py
-tightbinding.egg-info/PKG-INFO
-tightbinding.egg-info/SOURCES.txt
-tightbinding.egg-info/dependency_links.txt
-tightbinding.egg-info/requires.txt
-tightbinding.egg-info/top_level.txt
