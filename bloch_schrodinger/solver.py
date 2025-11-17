@@ -462,13 +462,13 @@ class Solver:
         )]
 
         eigve_coords += [xr.DataArray(
-            np.linspace(0,1,self.na1), 
-            coords = {'a1':np.linspace(0,1,self.na1)}
+            np.linspace(-0.5,0.5,self.na1), 
+            coords = {'a1':np.linspace(-0.5,0.5,self.na1)}
         )]
         
         eigve_coords += [xr.DataArray(
-            np.linspace(0,1,self.na2), 
-            coords = {'a2':np.linspace(0,1,self.na2)}
+            np.linspace(-0.5,0.5,self.na2), 
+            coords = {'a2':np.linspace(-0.5,0.5,self.na2)}
         )]        
 
         eigve_coords += [xr.DataArray(
@@ -531,7 +531,7 @@ class Solver:
                 raise TypeError(f"{u}-th alpha term not of a recognized type (int, float or xr.DataArray)")
         return alphas
 
-    def solve(self, n_eigva:int, keep_vecs:bool = 'True')->tuple[xr.DataArray]:
+    def solve(self, n_eigva:int, keep_vecs:bool = 'True', **kwargs)->tuple[xr.DataArray]:
         """Solve the eigenvalue problem at every points of the parameter space, using the scipy.sparse.eigsh function. This function is painfully parallelizable, 
         you are welcome to create your own based on your architecture and needs. The eigenvalues and vectors are returned as properly shaped DataArrays.
 
@@ -540,6 +540,9 @@ class Solver:
             keep_vecs (bool, optional): Wether to keep the eigenvectors. Defaults to 'True'.
         Returns:
             tuple[xr.DataArray]: the eigenvalues and the eigenvectors if keep_vecs is True.
+            
+        Additional kwargs:
+            phase0 (tuple[float,float,int]): The position at which to fix the phase of each eigenvector, in a1, a2, field basis. Default to (0.51, 0.51, 0).
         """
 
         # Create empty DataArrays to store the eigenvalues and vectors
@@ -657,7 +660,11 @@ class Solver:
         
         if keep_vecs:
             eigve = eigve.unstack(dim='component').rename('eigve')
-            eigve = eigve * xr.ufuncs.exp(1j*xr.ufuncs.angle(eigve.sel(a1=0.5,a2=0.55, field = 0, method='nearest')))
+            
+            pos0 = kwargs.get('phase0', (0.51,0.51,0))
+            sel0 = dict(a1 = pos0[0], a2 = pos0[1], field = pos0[2])
+            
+            eigve = eigve * xr.ufuncs.exp(1j*xr.ufuncs.angle(eigve.sel(sel0, method='nearest')))
             x = self.a1[0]*eigve.a1 + self.a2[0]*eigve.a2
             y = self.a1[1]*eigve.a1 + self.a2[1]*eigve.a2
             eigve = eigve.assign_coords({

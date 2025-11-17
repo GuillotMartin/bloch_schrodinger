@@ -8,6 +8,9 @@ import cmcrameri.cm as cm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from copy import deepcopy
 
+from bloch_schrodinger.potential import Potential
+from bloch_schrodinger.utils import create_sliders
+
 import matplotlib
 import matplotlib.colors as colors
 import matplotlib.pyplot as plt
@@ -42,23 +45,27 @@ def get_template(name:str):
         "pivot":'mid'
     }
     
+    contours = {
+        "levels": 0, 
+        "colors": 'white', 
+        "linewidths": 1, 
+        "linestyles": 'dashed',
+    }
+    
     if name == 'amplitude':
         temp = {
             "colormap": cm.oslo_r,
             "norm": lambda: colors.Normalize(), # using a factory function to avoid colormap sharing
             "colorbarticks":None,
+            "autoscale": True,
             "pcolormeshkwargs":{},
-            "contourkwargs":{
-                "levels": 0, 
-                "colors": 'black', 
-                "linewidths": 1, 
-                "linestyles": 'dashed',
-            },
+            "contourkwargs":deepcopy(contours),
             "cbarkwargs":{
                 "format": "{x:.1e}",
             },
             "quiverkwargs":deepcopy(quivers),
         }
+        temp['contourkwargs']['colors'] = 'black'
         return temp
 
     if name == 'amplitude - log':
@@ -66,13 +73,9 @@ def get_template(name:str):
             "colormap": cm.oslo,
             "norm": lambda: colors.LogNorm(),
             "colorbarticks":None,
+            "autoscale": True,
             "pcolormeshkwargs":{},
-            "contourkwargs":{
-                "levels": 0, 
-                "colors": 'white', 
-                "linewidths": 1, 
-                "linestyles": 'dashed',
-            },
+            "contourkwargs":deepcopy(contours),
             "cbarkwargs":{
                 "format": "{x:.1e}",
             },
@@ -85,13 +88,9 @@ def get_template(name:str):
             "colormap": cm.berlin,
             "norm": lambda: colors.CenteredNorm(),
             "colorbarticks":None,
+            "autoscale": True,
             "pcolormeshkwargs":{},
-            "contourkwargs":{
-                "levels": 0, 
-                "colors": 'white', 
-                "linewidths": 1, 
-                "linestyles": 'dashed',
-            },
+            "contourkwargs":deepcopy(contours),
             "cbarkwargs":{
                 "format": "{x:.1e}",
             },
@@ -105,12 +104,7 @@ def get_template(name:str):
             "norm": lambda: colors.CenteredNorm(), 
             "clim": (-np.pi, np.pi),
             "pcolormeshkwargs":{},
-            "contourkwargs":{
-                "levels": 0, 
-                "colors": 'white', 
-                "linewidths": 1, 
-                "linestyles": 'dashed',
-            },
+            "contourkwargs":deepcopy(contours),
             "cbarkwargs":{
                 "label": r'$\phi$', 
                 "ticks": [-np.pi, 0, np.pi]
@@ -120,11 +114,12 @@ def get_template(name:str):
         }
         return temp
 
+
 def plot_eigenvector(
     plots:list[list[xr.DataArray]], 
-    potentials:list[list[xr.DataArray]], 
+    potentials:list[list[Potential]], 
     templates:list[list[Union[str,dict]]],
-    titles: list[list[str]],
+    titles: Union[NoneType, list[list[str]]] = None,
     quivers:Union[NoneType, list[list[Union[NoneType, tuple[xr.DataArray]]]]] = None
     ):
     """The main function to plot eigenvectors in a interactive manner.
@@ -132,10 +127,10 @@ def plot_eigenvector(
     Args:
         plots (list[list[xr.DataArray]]): A list of list of eigenvectors xr.DataArrays, each DataArray will be plotted in a separate subplot, 
         in a grid-pattern determined by the structure of the list of lists.
-        potentials (list[list[xr.DataArray]]): The potentials to be plotted as contour for each plot.
+        potentials (list[list[Potential]]): The potentials to be plotted as contour for each plot.
         templates (list[list[Union[str,dict]]]): A dictionnary containing all the instruction to define each subplot style. the templates can also be strings 
         calling predefined templates, such as 'amplitude', 'phase', 'real' and more. see 'get_template' for more informations.
-        titles (list[list[str]]): The title for each subplot.
+        titles (Union[NoneType, list[list[str]]): The title for each subplot. Default to None.
         quivers (Union[NoneType, list[list[Union[NoneType, tuple[xr.DataArray]]]]], optional): An optional argument to overlay quiver plots on top of the eigenvectors. 
         Each entry of the list of lists must either be None or contain a tuple of DataArrays (U,V,C), see the quiver function from matplotlib for more informations. 
         Defaults to None.
@@ -154,6 +149,8 @@ def plot_eigenvector(
     
     if not quivers:
         quivers = [[None]*n_cols for u in range(n_rows)]
+    if not titles:
+        titles = [['']*n_cols for u in range(n_rows)]
         
     sliders = {}
       
@@ -161,18 +158,18 @@ def plot_eigenvector(
             fig:Figure, 
             ax:Axes, 
             plot:xr.DataArray, 
-            potential:xr.DataArray, 
+            potential:Potential, 
             quiver:Union[NoneType, tuple[xr.DataArray]], 
-            template:Union[str,dict], 
+            template:dict, 
             title:str
-        )-> tuple[Axes, dict, QuadMesh, QuadContourSet, Quiver, dict]:
+        )-> tuple[Axes, QuadMesh, QuadContourSet, Quiver, dict]:
         """A function to create a single subplot
 
         Args:
             fig (Figure): the global figure object
             ax (Axes): The ax in which to plot.
             plot (xr.DataArray): The DataArray to plot as a heatmap.
-            potential (xr.DataArray): The Potential to plot as a contour plot.
+            potential (Potential): The Potential to plot as a contour plot.
             quiver (Union[NoneType, tuple[xr.DataArray]]): The DataArray tuple to plot as a quiver.
             template (Union[str,dict]): The template, either a string to call 'get_template' or a dictionary
             title (str): The title of the subplot.
@@ -181,20 +178,7 @@ def plot_eigenvector(
             tuple[Axes, dict, QuadMesh, QuadContourSet, Quiver, dict]: The axes, objects plotted and a template in the dictionary format
         """
         slider_dims = [dim for dim in plot.dims if dim not in ['a1','a2','x','y']]
-        sliders_ax = {}
-        for dim in slider_dims:
-            coord = plot.coords[dim].values
-            val = coord[0]  # start left
-            if np.issubdtype(coord.dtype, np.floating):
-                sliders_ax[dim] = FloatSlider(
-                    min=float(coord.min()),
-                    max=float(coord.max()),
-                    step=float((coord.max() - coord.min()) / max(100, len(coord))),
-                    value=float(val),
-                    description=dim
-                )
-            else:
-                sliders_ax[dim] = IntSlider(min=0, max=len(coord) - 1, step=1, value=coord[0], description=dim)
+        sliders_ax = create_sliders(plot, slider_dims)
 
         initial_field_sel = {dim:sliders_ax[dim].value for dim in slider_dims}
         initial_potential_sel = {dim:sliders_ax[dim].value for dim in slider_dims if dim in potential.V.dims}
@@ -202,9 +186,6 @@ def plot_eigenvector(
         
         field = plot.sel(initial_field_sel)
         pot = potential.V.sel(initial_potential_sel)
-
-        if isinstance(template,str):
-            template = get_template(template)
 
         norm = template['norm']() if callable(template['norm']) else template['norm']
         mesh = ax.pcolormesh(
@@ -214,6 +195,9 @@ def plot_eigenvector(
             norm = norm,
             **template["pcolormeshkwargs"],
         )
+        
+        if 'clim' in template:
+            mesh.set_clim(template['clim'][0], template['clim'][1])
                 
         contour = ax.contour(
             plot.x, plot.y, pot, 
@@ -249,7 +233,7 @@ def plot_eigenvector(
             cbar.set_ticks(ticks)
             cbar.set_ticklabels(template["cbartickslabel"])
             
-        return ax, template, mesh, contour, quiv, sliders_ax
+        return ax, mesh, contour, quiv, sliders_ax
         # cbar.set_label("Potential")
     
     fig, axes = plt.subplots(
@@ -262,17 +246,20 @@ def plot_eigenvector(
     
     for i in range(n_rows):
         for j in range(n_cols):
-            ax, template, mesh, contour, quiv, slider_ax = create_axe(
+            
+            template = get_template(templates[i][j]) if type(templates[i][j])==str else deepcopy(templates[i][j])
+            
+            ax, mesh, contour, quiv, slider_ax = create_axe(
                 fig,
                 axes[i][j], 
                 plots[i][j], 
                 potentials[i][j],
                 quivers[i][j],
-                templates[i][j],
+                template,
                 titles[i][j]
             )
             
-            dict_templates += [deepcopy(template)]
+            dict_templates += [template]
             axes[i][j] = ax
             indx += [i]
             jndx += [j]
@@ -308,7 +295,7 @@ def plot_eigenvector(
             
             meshes[u].set_array(new_plot.data.reshape(-1))
             template = dict_templates[u]
-            if 'clim' not in template:
+            if template.get("autoscale", False):
                 meshes[u].autoscale()
                      
             contours[u].remove()
@@ -331,8 +318,8 @@ def plot_bands(
         dim:str,
         xmin:float = None, xmax:float = None,
         ymin:float = None, ymax:float = None,
-        figkw:dict = {}, 
-        **linekw,
+        linekws:Union[dict, list[dict]] = dict(),
+        figkw:dict = {},
     ):
     """The main function to plot the eigenvalues in an interactive manner. Plot each eigenvalue as a function of the parameter dimension 'dim'.
 
@@ -343,20 +330,14 @@ def plot_bands(
         xmax (float, optional): Like xmax from plt.plot. Defaults to None.
         ymin (float, optional): Like ymin from plt.plot. Defaults to None.
         ymax (float, optional): Like ymax from plt.plot. Defaults to None.
+        linekws (dict or list[dict], optional): keywords arguments to be passed to plt.plot. If a list of dictionnaries are given, then the dictionary linekws[i%len(linekws)] 
+        is used for the i-th band. Defaults to {}.
         figkw (dict, optional): A dictionnary passed to the plt.subplots function. Defaults to {}.
-        Additional parameters are passed as kwargs to plt.plot().
     """
+    
+    list_linekw = linekws if type(linekws) == list else [linekws]
     slider_dims = [d for d in eigva.dims if d not in [dim, 'band']]
-    sliders = {}
-    for d in slider_dims:
-        values = eigva.coords[d]
-        sliders[d] = FloatSlider(
-            value = values[0],
-            min = values.min(),
-            max = values.max(),
-            step = (values.max()-values.min())/100,
-            description = d,
-        )
+    sliders = create_sliders(eigva, slider_dims)
     
     initial_sel = {dim:sliders[dim].value for dim in slider_dims}
     
@@ -364,8 +345,9 @@ def plot_bands(
 
     fig, ax = plt.subplots(**figkw)
     lines = []
-    for i in eigva.band:
-        line = ax.plot(eigva.coords[dim], initial_band.sel(band = i), **linekw)
+    nbands = len(eigva.band)
+    for i, b in enumerate(eigva.band):
+        line = ax.plot(eigva.coords[dim], initial_band.sel(band = b), **list_linekw[i%len(list_linekw)])
         lines += line
 
     
@@ -384,3 +366,127 @@ def plot_bands(
     out = interactive_output(update, sliders)
     # Display everything
     display(VBox(list(sliders.values()) + [out]))
+
+def energy_levels(
+    eigva:xr.DataArray, 
+    eigve:xr.DataArray, 
+    potential:Potential, 
+    res:int = 100, 
+    ymin:float = None,
+    ymax:float = None,
+    frac:float = 0.05):
+    
+        
+    band_dims = [dim for dim in eigva.dims if not dim == 'band']
+    potential_dims = [dim for dim in potential.V.dims if dim not in ['a1', 'a2', 'x', 'y']]
+    
+    sliders = {**create_sliders(eigva, band_dims), **create_sliders(potential.V, potential_dims)}
+    
+    initial_potential_sel = {dim:sliders[dim].value for dim in potential_dims}
+    initial_eigve_sel = {dim:sliders[dim].value for dim in band_dims}
+    initial_eigva_sel = {dim:sliders[dim].value for dim in band_dims}
+    
+    bound = float(((potential.x**2+potential.y**2)**0.5).max())
+    cut_coord = np.linspace(-bound, bound, res)
+    
+    slider_y = FloatSlider(
+        value = 0,
+        min = cut_coord[0],
+        max = cut_coord[-1],
+        step = (cut_coord[-1]-cut_coord[0])//res,
+        description = 'y'
+    )
+    
+    slider_rot = FloatSlider(
+        value = 0,
+        min = 0,
+        max = np.pi*2,
+        step = np.pi/100,
+        description = 'cut rotation (rad)'
+    )
+    
+    x_coord, y_coord = np.cos(slider_rot.value)*cut_coord, np.sin(slider_rot.value)*cut_coord + slider_y.value
+    e1, e2 = potential.a1/(potential.a1@potential.a1), potential.a2/(potential.a2@potential.a2)
+    
+    a1_coord = xr.DataArray(x_coord*e1[0] + y_coord*e1[1], coords = {'z':cut_coord})
+    a2_coord = xr.DataArray(x_coord*e2[0] + y_coord*e2[1], coords = {'z':cut_coord})
+    
+    initial_potential = potential.V.sel(initial_potential_sel)
+    initial_eigva = eigva.sel(initial_eigva_sel)
+    initial_eigve = eigve.sel(initial_eigve_sel)
+    
+    initial_potential_slice = initial_potential.interp(a1 = a1_coord, a2 = a2_coord, kwargs={"fill_value": potential.v0})
+    initial_eigve_slice = initial_eigve.interp(a1 = a1_coord, a2 = a2_coord, kwargs={"fill_value": 0})
+    
+    potential_range = (initial_potential_slice.real.max() - initial_potential_slice.real.min())
+    ymin = initial_potential_slice.real.min() if ymin is None else ymin
+    ymax = initial_potential_slice.real.max() if ymin is None else ymax
+    plot_range = ymax - ymin
+    
+    initial_eigve_slice = initial_eigve_slice / abs(eigve).max() * plot_range*frac + initial_eigva
+
+        
+    pad = potential_range*0.03
+    eigve_lines = []
+
+    fig, ax = plt.subplots()
+    
+    potential_line = ax.fill_between(
+        initial_potential_slice.z, 
+        initial_potential_slice.real, 
+        initial_potential_slice.real.min()-pad, 
+        ec = 'none', fc = 'k', alpha = 0.3
+    )
+    
+    for b in eigva.band:
+        line = ax.fill_between(
+            initial_eigve_slice.z, 
+            initial_eigve_slice.sel(band=b), 
+            initial_eigva.sel(band = b), 
+            alpha = 0.5
+        )
+        eigve_lines += [line] 
+    
+    ax.set_ylim(ymin,ymax)
+    ax.set_xlim(cut_coord.min(),cut_coord.max())
+
+    def update(**kwargs):
+        sliders_params = {dim:kwargs[dim] for dim in kwargs if dim not in ['y', 'rot']}
+        slider_y = kwargs['y']  
+        slider_rot = kwargs['rot']
+        
+        x_coord, y_coord = np.cos(slider_rot)*cut_coord, np.sin(slider_rot)*cut_coord + slider_y
+        
+        a1_coord = xr.DataArray(x_coord*e1[0] + y_coord*e1[1], coords = {'z':cut_coord})
+        a2_coord = xr.DataArray(x_coord*e2[0] + y_coord*e2[1], coords = {'z':cut_coord})
+        
+        potential_sel = {dim:sliders_params[dim] for dim in potential_dims}
+        eigva_sel = {dim:sliders_params[dim] for dim in band_dims}
+        eigve_sel = {dim:sliders_params[dim] for dim in band_dims}
+
+        new_potential = potential.V.sel(potential_sel, method = 'nearest')
+        new_eigva = eigva.sel(eigve_sel, method = 'nearest')
+        new_eigve = eigve.sel(eigva_sel, method = 'nearest')
+        
+        potential_slice = new_potential.interp(a1 = a1_coord, a2 = a2_coord, kwargs={"fill_value": potential.v0})
+        eigve_slice = new_eigve.interp(a1 = a1_coord, a2 = a2_coord, kwargs={"fill_value": 0})
+    
+        eigve_slice = eigve_slice / abs(eigve).max() * plot_range*frac + new_eigva
+        
+        potential_line.set_data(
+            potential_slice.z, 
+            potential_slice.real, 
+            potential.V.real.min()-pad
+        )
+        
+        for i, b in enumerate(eigva.band):
+            eigve_lines[i].set_data(
+                eigve_slice.z, 
+                eigve_slice.sel(band=b), 
+                new_eigva.sel(band = b)
+            )
+            
+    
+    out = interactive_output(update, {**sliders, 'y':slider_y, 'rot':slider_rot})
+    # Display everything
+    display(VBox([HBox(list(sliders.values())), HBox([slider_y, slider_rot]) ,out]))

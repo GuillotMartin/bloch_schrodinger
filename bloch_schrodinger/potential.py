@@ -8,6 +8,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from copy import deepcopy
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
+from bloch_schrodinger.utils import create_sliders
 
 scalar = [int, float, complex, np.generic]
 
@@ -214,20 +215,7 @@ class Potential:
         """Creates an interactive plot of the potential, with all the parameters as sliders. Must be used in an interactive python session, preferably a notebook.
         """
         slider_dims = [dim for dim in self.V.dims if dim not in ['a1','a2','x','y']]
-        sliders = {}
-        for dim in slider_dims:
-            coord = self.V.coords[dim].values
-            val = coord[0]  # start left
-            if np.issubdtype(coord.dtype, np.floating):
-                sliders[dim] = FloatSlider(
-                    min=float(coord.min()),
-                    max=float(coord.max()),
-                    step=float((coord.max() - coord.min()) / max(100, len(coord))),
-                    value=float(val),
-                    description=dim
-                )
-            else:
-                sliders[dim] = IntSlider(min=0, max=len(coord) - 1, step=1, value=len(coord) // 2, description=dim)
+        sliders = create_sliders(self.V, slider_dims)
 
         initial_sel = {dim:sliders[dim].value for dim in slider_dims}
         potential = self.V.sel(initial_sel)
