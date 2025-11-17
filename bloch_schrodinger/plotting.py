@@ -19,7 +19,7 @@ from matplotlib.figure import Figure
 from matplotlib.collections import QuadMesh
 from matplotlib.quiver import Quiver
 from matplotlib.contour import QuadContourSet
-
+from matplotlib.gridspec import GridSpec
 
 
 font = {"family": "serif", "size": 12, "serif": "cmr10"}
@@ -113,7 +113,6 @@ def get_template(name:str):
             "quiverkwargs":deepcopy(quivers),
         }
         return temp
-
 
 def plot_eigenvector(
     plots:list[list[xr.DataArray]], 
@@ -375,7 +374,18 @@ def energy_levels(
     ymin:float = None,
     ymax:float = None,
     frac:float = 0.05):
-    
+    """Create an interactive plot showing the mode profile of each eigenvector, placed at its corresponding energy and overlayed with the potential landscape.
+    The direction taken for the eigenvector modes is controled by the sliders 'offset' and 'rotation'.
+
+    Args:
+        eigva (xr.DataArray): eigenvalues, must have a consistent shape with respect to eigve
+        eigve (xr.DataArray): eigenvectors, must have a consistent shape with respect to eigva
+        potential (Potential): potential object used to solve the eigenproblem.
+        res (int, optional): The resolution of mode profile interpolation. Defaults to 100.
+        ymin (float, optional): The lower bound of the plot, if none, it is automatically determined by looking at the potential. Defaults to None.
+        ymax (float, optional): The upper bound of the plot, if none, it is automatically determined by looking at the potential. Defaults to None.
+        frac (float, optional): The fraction of the plot each mode profile occupies. At larger fractions, the profiles can overlap one another. Defaults to 0.05.
+    """
         
     band_dims = [dim for dim in eigva.dims if not dim == 'band']
     potential_dims = [dim for dim in potential.V.dims if dim not in ['a1', 'a2', 'x', 'y']]
@@ -394,7 +404,7 @@ def energy_levels(
         min = cut_coord[0],
         max = cut_coord[-1],
         step = (cut_coord[-1]-cut_coord[0])//res,
-        description = 'y'
+        description = 'offset'
     )
     
     slider_rot = FloatSlider(
@@ -490,3 +500,239 @@ def energy_levels(
     out = interactive_output(update, {**sliders, 'y':slider_y, 'rot':slider_rot})
     # Display everything
     display(VBox([HBox(list(sliders.values())), HBox([slider_y, slider_rot]) ,out]))
+
+
+def dashboard(
+    eigva:xr.DataArray,
+    eigvadim:str,
+    eigveplots:list[list[Union[NoneType,xr.DataArray]]], 
+    potential:Potential, 
+    template:Union[str,dict],
+    titles: Union[NoneType, list[list[Union[NoneType,str]]]] = None,
+    quivers:Union[NoneType, list[list[Union[NoneType, tuple[xr.DataArray]]]]] = None,
+    eigvawidth:int = 0.3,
+    figkw:dict = {},
+    gskw:dict = {},
+    spines:bool = True,
+    linekws:Union[list[dict], dict] = {"color":"blue"},
+    autoscale:bool = True
+    ):
+    """A high-level function to plot the eigenvalues and the eigenvectors at the same time. see docs\AtomicToMolecular.ipynb for an example.
+
+    Args:
+        eigva (xr.DataArray): The eigenvalue DataArray
+        eigvadim (str): The dimension to plot the eigenvalues against
+        eigveplots (list[list[Union[NoneType,xr.DataArray]]]): A matrix representing the plot structure. 
+        The figure will consist of a panel showing the eigenvalues, and beside it an array of pcolormeshes with the structure specified by this matrix
+        potential (Potential): The potential for the contour overlay, only one needs to be given.
+        template (Union[str,dict]): A template to use for the colormesh, see doc of 'plot_eigenvector' and 'get_template' for more infos.
+        titles (Union[NoneType, list[list[Union[NoneType,str]]]], optional): The titles, either a matrix with the same shape as plot_matrix, or None. Defaults to None.
+        quivers (Union[NoneType, list[list[Union[NoneType, tuple[xr.DataArray]]]]], optional): A quiverplot to overlay, see 'plot_eigenvectors' for more infos. Defaults to None.
+        eigvawidth (int, optional): The fraction of the plot taken by the eigenvalue structure. Defaults to 0.3.
+        figkw (dict, optional): A dictionary to pass to the figure constructor. Defaults to {}.
+        gskw (dict, optional): Additionnal keywords my be given to the gridspec handling the plots. see matplotlib doc for more infos. Defaults to {}.
+        spines (bool, optional): Whether to show the box around each pcolormesh. Defaults to True.
+        linekws (Union[list[dict], dict], optional): keywords arguments to be passed to plt.plot. If a list of dictionnaries are given, then the dictionary linekws[i%len(linekws)] 
+        is used for the i-th band. Defaults to {"color":"blue"}.
+        autoscale (bool, optional): Set to False to stop the rescaling of the yaxis of the band plot. Defaults to True.
+    """
+    n_rows = len(eigveplots)
+    n_cols = len(eigveplots[0])
+    n_cols_tot = n_cols + eigvawidth
+    
+    list_linekw = linekws if type(linekws) == list else [linekws]
+    if not quivers:
+        quivers = [[None]*n_cols for u in range(n_rows)]
+    if not titles:
+        titles = [['']*n_cols for u in range(n_rows)]
+    
+    bands_dims = [dim for dim in eigva.dims if dim not in ['band', eigvadim]]
+    sliders = create_sliders(eigva, bands_dims)
+      
+    def create_axe(
+            fig:Figure, 
+            ax:Axes, 
+            plot:xr.DataArray, 
+            potential:Potential, 
+            quiver:Union[NoneType, tuple[xr.DataArray]], 
+            template:dict, 
+            title:str
+        )-> tuple[Axes, QuadMesh, QuadContourSet, Quiver, dict]:
+        """A function to create a single subplot
+
+        Args:
+            fig (Figure): the global figure object
+            ax (Axes): The ax in which to plot.
+            plot (xr.DataArray): The DataArray to plot as a heatmap.
+            potential (Potential): The Potential to plot as a contour plot.
+            quiver (Union[NoneType, tuple[xr.DataArray]]): The DataArray tuple to plot as a quiver.
+            template (Union[str,dict]): The template, either a string to call 'get_template' or a dictionary
+            title (str): The title of the subplot.
+
+        Returns:
+            tuple[Axes, dict, QuadMesh, QuadContourSet, Quiver, dict]: The axes, objects plotted and a template in the dictionary format
+        """
+        slider_dims = [dim for dim in plot.dims if dim not in ['a1','a2','x','y']]
+        sliders_ax = create_sliders(plot, slider_dims)
+
+        initial_field_sel = {dim:sliders_ax[dim].value for dim in slider_dims}
+        initial_potential_sel = {dim:sliders_ax[dim].value for dim in slider_dims if dim in potential.V.dims}
+        
+        
+        field = plot.sel(initial_field_sel)
+        pot = potential.V.sel(initial_potential_sel)
+
+        norm = template['norm']() if callable(template['norm']) else template['norm']
+        mesh = ax.pcolormesh(
+            plot.x, plot.y, field, 
+            shading='auto', 
+            cmap = template['colormap'],
+            norm = norm,
+            **template["pcolormeshkwargs"],
+        )
+        
+        if 'clim' in template:
+            mesh.set_clim(template['clim'][0], template['clim'][1])
+                
+        contour = ax.contour(
+            plot.x, plot.y, pot, 
+            **template["contourkwargs"]
+        )
+
+        quiv = None
+        if quiver is not None:
+            initial_quiver_sel = {dim:sliders_ax[dim].value for dim in slider_dims if dim in quiver[0].dims}
+            svert, shor = quiver[0].sel(initial_quiver_sel).shape
+            narrows = template.get("number of arrows", (max(1,svert//15)))
+            template["number of arrows"] = narrows
+            UVC = [C.sel(initial_quiver_sel)[::narrows, ::narrows] for C in quiver]
+            
+            quiv = ax.quiver(
+                plot.x[::narrows, ::narrows], plot.y[::narrows, ::narrows], *UVC,
+                **template.get("quiverkwargs", dict(color='w'))
+            )
+            
+        
+        ax.set_aspect('equal')
+        ax.xaxis.set_visible(False)
+        ax.yaxis.set_visible(False)
+        for sp in ['bottom', 'top', 'left', 'right']:
+            ax.spines[sp].set_visible(spines)
+        ax.set_title(title)
+        
+        # divider = make_axes_locatable(ax)
+        # cax = divider.append_axes("right", size="5%", pad=0.05)
+        # cbar = fig.colorbar(
+        #     mesh, 
+        #     cax=cax,
+        #     **template['cbarkwargs'],
+        # )
+        # if template.get("cbartickslabel"):
+        #     ticks = template["cbarkwargs"].get("ticks", cbar.ax.get_yticks())
+        #     cbar.set_ticks(ticks)
+        #     cbar.set_ticklabels(template["cbartickslabel"])
+            
+        return ax, mesh, contour, quiv, sliders_ax
+        # cbar.set_label("Potential")
+    
+    
+    fig = plt.figure(figsize=(min(3*(n_cols_tot + 1), 10), max(3*(n_rows-1), 3)), **figkw)
+    gs_bands = GridSpec(1, 1, left=0.05, right=eigvawidth)
+    gs_eigenvectors = GridSpec(n_rows, n_cols, 1, left=eigvawidth+0.05, right=0.98, **gskw)
+    
+    axes = []
+    indx, jndx, meshes, contours, quivs, dict_templates = [], [], [], [], [], []
+    
+    for i in range(n_rows):
+        for j in range(n_cols):
+            if eigveplots[i][j] is not None:
+                template = get_template(template) if type(template)==str else deepcopy(template)
+                ax = fig.add_subplot(gs_eigenvectors[i, j])
+                ax, mesh, contour, quiv, slider_ax = create_axe(
+                    fig,
+                    ax, 
+                    eigveplots[i][j], 
+                    potential,
+                    quivers[i][j],
+                    template,
+                    titles[i][j]
+                )
+                
+                dict_templates += [template]
+                axes += [ax]
+                indx += [i]
+                jndx += [j]
+                meshes += [mesh]
+                contours += [contour]
+                quivs += [quiv]
+                sliders.update(slider_ax)
+    
+    ax = fig.add_subplot(gs_bands[0,0])
+    initial_eigva_sel = {dim:sliders[dim].value for dim in bands_dims}
+    initial_eigva = eigva.sel(initial_eigva_sel)
+    
+    lines = []
+    for i, b in enumerate(eigva.band):
+        line = ax.plot(eigva.coords[eigvadim], initial_eigva.sel(band = b), **list_linekw[i%len(list_linekw)])
+        lines += line
+    ax.set_xlabel(eigvadim)
+    dim_pos = ax.axvline(sliders[eigvadim].value, linestyle = 'dashed', color = 'red')
+
+
+    def update_eigenvectors(**kwargs):
+        eigve_sel = {dim:kwargs[dim] for dim in sliders}
+        new_plots, new_potentials, new_quivs = [], [], []
+        for i in range(n_rows):
+            for j in range(n_cols):
+                if eigveplots[i][j] is not None:
+                    field_sel = {dim:value for dim, value in eigve_sel.items() 
+                                if dim in eigveplots[i][j].dims 
+                                and dim not in ['a1','a2','x','y']}
+                    
+                    potential_sel = {dim:value for dim, value in field_sel.items() 
+                                    if dim in potential.V.dims}
+                    
+                    new_plots += [eigveplots[i][j].sel(field_sel, method = 'nearest')]
+                    new_potentials += [potential.V.sel(potential_sel, method = 'nearest')]
+                    
+                    if quivers[i][j] is not None:
+                        new_quiv = [C.sel(field_sel, method = 'nearest') for C in quivers[i][j]]
+                    else:
+                        new_quiv = None
+                    new_quivs += [new_quiv]
+                
+
+        for u, (new_plot, new_pot, new_quiv) in enumerate(zip(new_plots, new_potentials, new_quivs)):
+            meshes[u].set_array(new_plot.data.reshape(-1))
+            if template.get("autoscale", False):
+                meshes[u].autoscale()
+
+            contours[u].remove()
+            
+            contours[u] = axes[u].contour(
+                new_plot.x, new_plot.y, new_pot, 
+                **template['contourkwargs']
+            )
+            if new_quiv is not None:
+                narrows = template["number of arrows"]
+                UVC = [C[::narrows,::narrows] for C in new_quiv]
+                quivs[u].set_UVC(*UVC)
+
+    def update_bands(**kwargs):
+        sel = {dim:kwargs[dim] for dim in bands_dims}
+        new_bands = eigva.sel(sel, method = 'nearest')
+        for i,b in enumerate(eigva.band):
+            lines[i].set_ydata(new_bands.sel(band = b).data)
+        dim_pos.set_xdata([kwargs[eigvadim], kwargs[eigvadim]])
+        if autoscale:
+            pad = (new_bands.max()-new_bands.min())*0.05
+            ax.set_ylim(new_bands.min()-pad, new_bands.max()+pad)
+
+    def update(**kwargs):
+        update_eigenvectors(**kwargs)
+        update_bands(**kwargs)
+        fig.canvas.draw_idle()
+    
+    out = interactive_output(update, sliders)
+    # Display everything
+    display(VBox(list(sliders.values()) + [out]))
