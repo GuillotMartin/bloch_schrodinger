@@ -39,7 +39,7 @@ class Potential:
             self,
             unitvecs:list[list[float,float]], 
             resolution:tuple[int,int], 
-            v0:Union[int, float, complex, np.generic,xr.DataArray] = 0, 
+            v0:Union[int, float, complex, np.generic,xr.DataArray] = 100, 
             dtype:Union[Type[int],Type[float],Type[complex],Type[np.generic]] = float
         ):
         """Initialize a Potential object.

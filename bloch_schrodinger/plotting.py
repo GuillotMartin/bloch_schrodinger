@@ -501,7 +501,6 @@ def energy_levels(
     # Display everything
     display(VBox([HBox(list(sliders.values())), HBox([slider_y, slider_rot]) ,out]))
 
-
 def dashboard(
     eigva:xr.DataArray,
     eigvadim:str,
@@ -736,3 +735,4 @@ def dashboard(
     out = interactive_output(update, sliders)
     # Display everything
     display(VBox(list(sliders.values()) + [out]))
+
