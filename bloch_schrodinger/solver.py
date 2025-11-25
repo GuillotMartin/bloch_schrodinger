@@ -1,10 +1,10 @@
 import numpy as np
 import xarray as xr
 from typing import Union
-from bloch_schrodinger.potential import Potential, honeycomb
+from bloch_schrodinger.potential import Potential
 import scipy.sparse as sps
 from tqdm import tqdm
-from scipy.sparse.linalg import lobpcg, LinearOperator, spilu, eigsh
+from scipy.sparse.linalg import eigsh
 import warnings
 
 def real(arr:xr.DataArray)->xr.DataArray:
@@ -32,7 +32,11 @@ class Solver:
     """The Solver class handles the heavy lifting of this package, constructing the Hamiltonian matrix and performing its efficient diagonalization
     """
     
-    def __init__(self, potentials:Union[Potential,list[Potential]],alphas:Union[Union[float,xr.DataArray],list[Union[float,xr.DataArray]]]):
+    def __init__(
+            self, 
+            potentials:Union[Potential,list[Potential]],
+            alphas:Union[Union[float,xr.DataArray],list[Union[float,xr.DataArray]]]
+        ):
         """Instantiate the solver.
 
         Args:

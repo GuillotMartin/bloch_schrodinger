@@ -46,7 +46,7 @@ def get_template(name:str):
     }
     
     contours = {
-        "levels": 0, 
+        "levels": np.array([50]), 
         "colors": 'white', 
         "linewidths": 1, 
         "linestyles": 'dashed',
@@ -311,6 +311,7 @@ def plot_eigenvector(
     out = interactive_output(update, sliders)
     # Display everything
     display(VBox(list(sliders.values()) + [out]))
+    return fig, ax
       
 def plot_bands(
         eigva:xr.DataArray,
@@ -365,6 +366,7 @@ def plot_bands(
     out = interactive_output(update, sliders)
     # Display everything
     display(VBox(list(sliders.values()) + [out]))
+    return fig, ax
 
 def energy_levels(
     eigva:xr.DataArray, 
@@ -430,7 +432,7 @@ def energy_levels(
     
     potential_range = (initial_potential_slice.real.max() - initial_potential_slice.real.min())
     ymin = initial_potential_slice.real.min() if ymin is None else ymin
-    ymax = initial_potential_slice.real.max() if ymin is None else ymax
+    ymax = initial_potential_slice.real.max() if ymax is None else ymax
     plot_range = ymax - ymin
     
     initial_eigve_slice = initial_eigve_slice / abs(eigve).max() * plot_range*frac + initial_eigva
@@ -481,7 +483,7 @@ def energy_levels(
         potential_slice = new_potential.interp(a1 = a1_coord, a2 = a2_coord, kwargs={"fill_value": potential.v0})
         eigve_slice = new_eigve.interp(a1 = a1_coord, a2 = a2_coord, kwargs={"fill_value": 0})
     
-        eigve_slice = eigve_slice / abs(eigve).max() * plot_range*frac + new_eigva
+        eigve_slice = eigve_slice / abs(eigve).max() * plot_range * frac + new_eigva
         
         potential_line.set_data(
             potential_slice.z, 
@@ -500,6 +502,7 @@ def energy_levels(
     out = interactive_output(update, {**sliders, 'y':slider_y, 'rot':slider_rot})
     # Display everything
     display(VBox([HBox(list(sliders.values())), HBox([slider_y, slider_rot]) ,out]))
+    return fig, ax
 
 def dashboard(
     eigva:xr.DataArray,
@@ -735,4 +738,5 @@ def dashboard(
     out = interactive_output(update, sliders)
     # Display everything
     display(VBox(list(sliders.values()) + [out]))
+    return fig, ax
 
