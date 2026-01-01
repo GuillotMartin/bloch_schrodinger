@@ -46,9 +46,9 @@ def get_template(name:str)->dict:
     }
     
     contours = {
-        "levels": 1, 
+        "levels": np.array([50]), 
         "colors": 'white', 
-        "linewidths": 0.5, 
+        "linewidths": 1, 
         "linestyles": 'dashed',
     }
     

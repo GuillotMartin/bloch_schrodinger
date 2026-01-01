@@ -35,6 +35,7 @@ REQUIRED = [
     'matplotlib',
     'ipympl',
     'tqdm',
+    'joblib',
 ]
 
 # What packages are optional?
