@@ -3,9 +3,9 @@ import xarray as xr
 from typing import Union
 from bloch_schrodinger.potential import Potential
 import scipy.sparse as sps
+from scipy.sparse.linalg import LinearOperator
 from tqdm import tqdm
 from scipy.sparse.linalg import eigsh
-import warnings
 from joblib import Parallel, delayed
 from numpy.linalg import svd, inv
 
@@ -46,8 +46,72 @@ def check_name(name: str):
             f"{name} is not a valid name for the object, as it is already used. The forbidden names are: {forbidden_names}"
         )
 
+def block_linear_operator(blocks):
+    """
+    Create a LinearOperator representing a block matrix of LinearOperators.
 
-class FDSolver:
+    Parameters
+    ----------
+    blocks : list of lists
+        A 2D list (rows x cols) of LinearOperators. Blocks can have different shapes.
+
+    Returns
+    -------
+    LinearOperator
+        The combined block operator.
+    """
+    n_rows = len(blocks)
+    n_cols = len(blocks[0])
+
+    # Determine row and column sizes for each block
+    row_sizes = [blocks[i][0].shape[0] for i in range(n_rows)]
+    col_sizes = [blocks[0][j].shape[1] for j in range(n_cols)]
+
+    total_rows = sum(row_sizes)
+    total_cols = sum(col_sizes)
+
+    # Compute start indices for slicing flattened input/output
+    row_starts = np.cumsum([0] + row_sizes[:-1])
+    col_starts = np.cumsum([0] + col_sizes[:-1])
+
+    def matvec(x):
+        # x is flattened input vector
+        out = np.zeros(total_rows, dtype=np.complex128)
+        for i in range(n_rows):
+            row_start = row_starts[i]
+            row_end = row_start + row_sizes[i]
+            out_block = np.zeros(row_sizes[i], dtype=np.complex128)
+            for j in range(n_cols):
+                col_start = col_starts[j]
+                col_end = col_start + col_sizes[j]
+                # Extract the block vector
+                x_block = x[col_start:col_end]
+                # Apply block operator
+                y_block = blocks[i][j].matvec(x_block)
+                # Sum contributions if multiple blocks in row
+                out_block += y_block
+            out[row_start:row_end] = out_block
+        return out
+
+    def rmatvec(x):
+        # Adjoint action
+        out = np.zeros(total_cols, dtype=np.complex128)
+        for j in range(n_cols):
+            col_start = col_starts[j]
+            col_end = col_start + col_sizes[j]
+            out_block = np.zeros(col_sizes[j], dtype=np.complex128)
+            for i in range(n_rows):
+                row_start = row_starts[i]
+                row_end = row_start + row_sizes[i]
+                x_block = x[row_start:row_end]
+                out_block += blocks[i][j].rmatvec(x_block)
+            out[col_start:col_end] = out_block
+        return out
+
+    return LinearOperator(shape=(total_rows, total_cols), matvec=matvec, rmatvec=rmatvec, dtype = complex)
+
+
+class FDSolver2:
     """The FDSolver class handles the heavy lifting of this package, constructing the Hamiltonian matrix and performing its efficient diagonalization, using a finite difference scheme"""
 
     def __init__(
@@ -363,7 +427,8 @@ class FDSolver:
             return weights
         
         self.weights2 = compute_hessian_weights(neighbors)
-
+        
+            
         # print(self.weights)
         # print(self.neighbors)
         # print(self.neighbors_indexes)
@@ -373,8 +438,8 @@ class FDSolver:
         # ax.set_aspect("equal")
         # plt.show()
         
-    def compute_hopping(self, delta_i: int, delta_j: int)->sps.spmatrix:
-        """Compute the hopping matrix connecting the site (i,j) to the site (i + delta_i, j+delta_j), 
+    def directional_derivative(self, delta_i: int, delta_j: int)->LinearOperator:
+        """Creates the directional derivative linear operator f(i + delta_i, j+delta_j) - f(i,j) (in array-index coordinates), 
         taking care of the periodic boundaries.
 
         Args:
@@ -382,39 +447,44 @@ class FDSolver:
             delta_j (int): Hopping along a2
 
         Returns:
-            sps.spmatrix: A (np,np) sparse matrix containing the hopping matrix.
+            LinearOperator
         """
         indx_start = np.arange(self.np)
         i_start, j_start = indx_start//self.na2, indx_start%self.na2
-        
         i_end, j_end = (i_start + delta_i)%self.na1, (j_start + delta_j)%self.na2
-        
         indx_end = i_end * self.na2 + j_end
+        indx_start_from_end = np.argsort(indx_end)
 
-        # diag = np.zeros((self.np, self.np), dtype = int)
-        # diag[indx_start, indx_end] = 1
         
-        all_offset = indx_end-indx_start
-        offsets = np.unique(all_offset)
-        frac_diags = []
-        for offset in offsets:
-            frac_diags += [np.roll(np.where(all_offset == offset, 1, 0), offset)]
+        def matvec(x):
+            return x[indx_end,] - x[:,]
+
+
+        def rmatvec(y):
+            return y[indx_start_from_end] - y
         
-        spsdiag = sps.dia_matrix((frac_diags, offsets), shape = (self.np, self.np))
-        return spsdiag
+        op = LinearOperator(
+            dtype = float,
+            shape = (self.np, self.np),
+            matvec = matvec,
+            rmatvec = rmatvec
+        ) 
+        return op
+
 
     def compute_grad(self):
         """compute the gradient and derivation operators"""        
         ## We use the stencil formula for symmetric shells
-        dy = sps.dia_matrix((self.np, self.np), dtype=float)
-        dx = sps.dia_matrix((self.np, self.np), dtype=float)
+        dy = LinearOperator((self.np, self.np), dtype=float, matvec = lambda x: x*0)
+        dx = LinearOperator((self.np, self.np), dtype=float, matvec = lambda x: x*0)
+        
         for i in range(self.stencil_size):
-            hop = self.compute_hopping(
+            op = self.directional_derivative(
                 self.neighbors_indexes[i,0].item(),
                 self.neighbors_indexes[i,1].item()
-            ) - sps.eye(self.np, self.np)
-            dx += hop * self.neighbors[i,0].item() * self.weights[i].item()
-            dy += hop * self.neighbors[i,1].item() * self.weights[i].item()
+            )
+            dx += op * self.neighbors[i,0].item() * self.weights[i].item()
+            dy += op * self.neighbors[i,1].item() * self.weights[i].item()
       
         self.dx, self.dy = dx, dy
         
@@ -422,58 +492,92 @@ class FDSolver:
     def compute_laplacian(self):
         """Compute the laplacian and second order derivation operators"""
         
-        self.lap = sps.dia_matrix((self.np, self.np), dtype=float)
-        self.dx_sec = sps.dia_matrix((self.np, self.np), dtype=float)
-        self.dy_sec = sps.dia_matrix((self.np, self.np), dtype=float)
-        self.dxdy = sps.dia_matrix((self.np, self.np), dtype=float)
-        self.dydx = sps.dia_matrix((self.np, self.np), dtype=float)
+        self.lap = LinearOperator((self.np, self.np), dtype=float, matvec = lambda x: x*0)
+        self.dx_sec = LinearOperator((self.np, self.np), dtype=float, matvec = lambda x: x*0)
+        self.dy_sec = LinearOperator((self.np, self.np), dtype=float, matvec = lambda x: x*0)
+        self.dxdy = LinearOperator((self.np, self.np), dtype=float, matvec = lambda x: x*0)
+        self.dydx = LinearOperator((self.np, self.np), dtype=float, matvec = lambda x: x*0)
 
         for i in range(self.stencil_size):
-            hop = self.compute_hopping(
+            op = self.directional_derivative(
                 self.neighbors_indexes[i,0].item(),
                 self.neighbors_indexes[i,1].item()
-            ) - sps.eye(self.np, self.np)
+            )
+            
             
             w =  self.weights[i].item()
             
-            self.lap += hop * w * 2
-            self.dx_sec += hop * self.weights2[(0,0)][i]
-            self.dy_sec += hop * self.weights2[(1,1)][i]
-            self.dxdy += hop * self.weights2[(0,1)][i]
-            self.dydx += hop * self.weights2[(1,0)][i]
+            self.lap += op * w * 2
+            self.dx_sec += op * self.weights2[(0,0)][i]
+            self.dy_sec += op * self.weights2[(1,1)][i]
+            self.dxdy += op * self.weights2[(0,1)][i]
+            self.dydx += op * self.weights2[(1,0)][i]
+                    
 
-
-    def compute_full_operators(self, alphas: list[float]):
-        """Compute all the total kinetic operators for each fields, as bloch sparse matrices
-
-        Args:
-            alphas (list[float]): The list of alphas to use
-        """
-
-        # Initialization as lists of blocks
-        alphaIdent = [
-            alphas[u] * sps.eye_array(n=self.np, m=self.np) for u in range(self.nb)
-        ]
-        alphaDx = [alphas[u] * self.dx for u in range(self.nb)]
-        alphaDy = [alphas[u] * self.dy for u in range(self.nb)]
-        alphaLap = [alphas[u] * self.lap for u in range(self.nb)]
-        # create the full matrices
-        self.alphaIdent = sps.block_diag(alphaIdent)
-        self.alphaDx = sps.block_diag(alphaDx)
-        self.alphaDy = sps.block_diag(alphaDy)
-        self.alphaLap = sps.block_diag(alphaLap)
-
-    def compute_kinetic(self, k: tuple[float] = (0, 0)) -> sps.dia_matrix:
-        """Compute the total kinetic operator.
+    def compute_kinetic(self, alphas:list[float], k: tuple[float] = (0, 0)) -> sps.dia_matrix:
+        """Compute the total kinetic operator from a list of kinetic terms hbar²/2m and k point.
 
         Args:
+            alphas (list[float]): The kinetic term, a list of nb values.
             k (tuple[float]): The k vector. default to (0,0)
         """
-        return (
-            -self.alphaLap
-            + 2 * 1j * (k[0] * self.alphaDx + k[1] * self.alphaDy)
-            + (k[0] ** 2 + k[1] ** 2) * self.alphaIdent
+        ident = LinearOperator(
+            dtype = float,
+            shape = (self.np, self.np),
+            matvec = lambda x: x,
+            rmatvec = lambda x: x
         )
+        
+        if self.nb == 1:
+            return alphas[0] * (
+                - self.lap
+                + 2 * 1j * (k[0] * self.dx + k[1] * self.dy)
+                + (k[0] ** 2 + k[1] ** 2) * ident
+            )
+        
+        else:
+            zeroOp = LinearOperator(
+                dtype=float, shape = (self.np, self.np), 
+                matvec = lambda x: x*0, rmatvec = lambda x: x*0
+            )
+            
+            blocksLap = [
+                [
+                    alphas[i] * self.lap if i == j else zeroOp for i in range(self.nb)
+                ]
+                for j in range(self.nb)
+            ]
+            self.alphaLap = block_linear_operator(blocksLap)
+
+            blocksDx = [
+                [
+                    alphas[i] * self.dx if i == j else zeroOp for i in range(self.nb)
+                ]
+                for j in range(self.nb)
+            ]
+            self.alphaDx = block_linear_operator(blocksDx)
+
+            blocksDy = [
+                [
+                    alphas[i] * self.dy if i == j else zeroOp for i in range(self.nb)
+                ]
+                for j in range(self.nb)
+            ]
+            self.alphaDy = block_linear_operator(blocksDy)
+
+            blocksIdent = [
+                [
+                    alphas[i] * ident if i == j else zeroOp for i in range(self.nb)
+                ]
+                for j in range(self.nb)
+            ]
+            self.alphaIdent = block_linear_operator(blocksIdent)
+        
+            return (
+                -self.alphaLap
+                + 2 * 1j * (k[0] * self.alphaDx + k[1] * self.alphaDy)
+                + (k[0] ** 2 + k[1] ** 2) * self.alphaIdent
+            )
 
     def set_reciprocal_space(
         self, kx: Union[float, xr.DataArray], ky: Union[float, xr.DataArray]
@@ -552,25 +656,29 @@ class FDSolver:
 
             self.allcoords.update({name: ["coupling", parameter]})
 
-    def add_coupling_matrix(
-        self, name: str, struct: sps.spmatrix, field1: int, field2: int
+    def add_coupling_operator(
+        self, name: str, op: LinearOperator, field1: int, field2: int
     ):
-        """Add a sparse matrix to the coupling context, to be evaluated during Hamiltonian construction.
+        """Add a linear operator to the coupling context, to be evaluated during Hamiltonian construction.
 
         Args:
-            name (str): The name of the matrix to call during evaluation, must be unique.
-            struct (sps.spmatrix): A (self.np,self.np) sparse matrix containing the structure of the coupling term.
-            hermitian (bool): Wheter to add also the
+            name (str): The name of the operator to call during evaluation, must be unique.
+            struct (LinearOperator): A (self.np,self.np) LinearOperator containing the structure of the coupling term.
         """
 
         check_name(name)
 
-        shape = [[None, None], [None, None]]
-        shape[field1][field2] = struct
-        shape[field2][field1] = struct.transpose().conj()
+        zeroOp = LinearOperator(
+                dtype=float, shape = (self.np, self.np), 
+                matvec = lambda x: x*0, rmatvec = lambda x: x*0
+            )
 
-        matrix = sps.block_array(shape)
-        self.coupling_context.update({name: matrix})
+        blocks = [[zeroOp for i in range(self.nb)] for j in range(self.nb)]
+        blocks[field1][field2] = op
+        blocks[field2][field1] = op.adjoint()
+
+        operator = block_linear_operator(blocks)
+        self.coupling_context.update({name: operator})
 
     def add_coupling(self, expr: str):
         """Add a coupling expression to the list of couplings. The coupling expression is a string that will be evaluated at Hamiltonian building phase.
@@ -592,11 +700,17 @@ class FDSolver:
             field2 (int): The target field of the coupling.
         """
 
-        matrix = sps.eye(self.np, self.np)
+        ident = LinearOperator(
+            dtype = float,
+            shape = (self.np, self.np),
+            matvec = lambda x: x,
+            rmatvec = lambda x: x
+        )
+        
         mat_name = f"id_{field1}{field2}"
         imat_name = f"i_id_{field1}{field2}"
-        self.add_coupling_matrix(mat_name, matrix, field1, field2)
-        self.add_coupling_matrix(mat_name, 1j * matrix, field1, field2)
+        self.add_coupling_operator(mat_name, ident, field1, field2)
+        self.add_coupling_operator(mat_name, 1j * ident, field1, field2)
 
         self.add_coupling(f"real({expr}) * {mat_name} + imag({expr}) * {imat_name}")
 
@@ -611,24 +725,32 @@ class FDSolver:
         f1, f2 = field1, field2  # shorten names for expression length
 
         # adding the real and imaginary main diagonal
-        matrix = sps.eye(self.np, self.np)
+        ident = LinearOperator(
+            dtype = float,
+            shape = (self.np, self.np),
+            matvec = lambda x: x,
+            rmatvec = lambda x: x
+        )
+        
+        
+        
         mat_name = f"id_{f1}{f2}"
-        self.add_coupling_matrix(mat_name, matrix, field1, field2)
+        self.add_coupling_operator(mat_name, ident, field1, field2)
 
         mat_name = f"i_id_{f1}{f2}"
-        self.add_coupling_matrix(mat_name, 1j * matrix, field1, field2)
+        self.add_coupling_operator(mat_name, 1j * ident, field1, field2)
 
-        self.add_coupling_matrix(f"dx_{f1}{f2}", self.dx, f1, f2)
-        self.add_coupling_matrix(f"dy_{f1}{f2}", self.dy, f1, f2)
+        self.add_coupling_operator(f"dx_{f1}{f2}", self.dx, f1, f2)
+        self.add_coupling_operator(f"dy_{f1}{f2}", self.dy, f1, f2)
 
-        self.add_coupling_matrix(f"dx_sec_{f1}{f2}", self.dx_sec, f1, f2)
-        self.add_coupling_matrix(f"dy_sec_{f1}{f2}", self.dy_sec, f1, f2)
+        self.add_coupling_operator(f"dx_sec_{f1}{f2}", self.dx_sec, f1, f2)
+        self.add_coupling_operator(f"dy_sec_{f1}{f2}", self.dy_sec, f1, f2)
 
         # we have to precompute the proper matrix multiplications in order to keep hermiticity
-        self.add_coupling_matrix(f"idx_{f1}{f2}", 1j * self.dx, f1, f2)
-        self.add_coupling_matrix(f"idy_{f1}{f2}", 1j * self.dy, f1, f2)
-        self.add_coupling_matrix(f"idxdy_{f1}{f2}", 1j * self.dxdy, f1, f2)
-        self.add_coupling_matrix(f"idydx_{f1}{f2}", 1j * self.dydx, f1, f2)
+        self.add_coupling_operator(f"idx_{f1}{f2}", 1j * self.dx, f1, f2)
+        self.add_coupling_operator(f"idy_{f1}{f2}", 1j * self.dy, f1, f2)
+        self.add_coupling_operator(f"idxdy_{f1}{f2}", 1j * self.dxdy, f1, f2)
+        self.add_coupling_operator(f"idydx_{f1}{f2}", 1j * self.dydx, f1, f2)
 
         # directly add kx and ky equal to 0 to the manager, it will be overwritten if kx and ky are defined latter.
         self.coupling_context.update({"kx": 0, "ky": 0})
@@ -781,8 +903,8 @@ class FDSolver:
         alpha_sel: dict,
         reciprocal_sel: dict,
         coupling_sel: dict,
-    ) -> sps.spmatrix:
-        """Return a (N, N) sparse matrix containing the Hamiltonian for a given set of parameters
+    ) -> LinearOperator:
+        """Return a (N, N) LinearOperator containing the Hamiltonian for a given set of parameters
 
         Args:
             potential_sel (dict): The parameters selection for the potential.
@@ -798,11 +920,15 @@ class FDSolver:
 
         # The potential is a diagonal matrix, which we stored as a data array.
         potdiag = self.potential_data.sel(potential_sel).data
-        potential_matrix = sps.diags(potdiag, offsets=0)
+        potential_operator = LinearOperator(
+            dtype = potdiag.dtype,
+            shape = (self.n, self.n),
+            matvec = lambda x: potdiag * x,
+            rmatvec = lambda x: np.conjugate(potdiag) * x
+        )
 
         # Same for the alphas, using the 'make_alpha_list' class method
         alphas = self.make_alpha_list(alpha_sel)
-        self.compute_full_operators(alphas)
 
         if isinstance(self.kx, xr.DataArray):
             kxsel = {
@@ -823,7 +949,7 @@ class FDSolver:
             ky = float(self.ky.sel(kysel).data)
         else:
             ky = self.ky
-        kinetic_matrix = self.compute_kinetic([kx, ky])
+        kinetic_operator = self.compute_kinetic(alphas)
 
         total_sel = {
             **potential_sel,
@@ -832,7 +958,7 @@ class FDSolver:
             **coupling_sel,
         }  # aggregating all the values of each selections
         ham = (
-            kinetic_matrix + potential_matrix
+            kinetic_operator + potential_operator
         )  # The initial Hamiltonian contains only the kinetic operator and the potential operator
 
         # --- Add the coupling terms to the Hamiltonian ---
@@ -843,13 +969,14 @@ class FDSolver:
         return ham
 
     def solve(
-        self, n_eigva: int, keep_vecs: bool = "True", parallel: bool = False, n_cores: int = -1, **kwargs
+        self, n_eigva: int, keep_vecs: bool = "True", parallel = False, n_cores: int = -1, **kwargs
     ) -> tuple[xr.DataArray, xr.DataArray]:
-        """Solve the eigenvalue problem at every points of the parameter space, using the scipy.sparse.eigsh function.
+        """Solves the eigenvalue problem at every points of the parameter space, using the scipy.sparse.eigsh function.
 
         Args:
             n_eigva (int): The number of eigenvalues to compute.
-            parallel (bool, optional): Wheter to parallelize the solver with joblib. Default to False.
+            keep_vecs(bool, optional): Wheter to keep or discard the eigenvectors. Default to True
+            parallel (bool, Optional): Wheter to parallelize the solver with joblib. Joblib has a large overhead so defautl to False.
             n_cores (int, optional): The number of cores to use for the solver, set to -1 to use all cores available. default to -1.
         Returns:
             tuple[xr.DataArray]: the eigenvalues and the eigenvectors if keep_vecs is True.
@@ -912,58 +1039,69 @@ class FDSolver:
         n_tot = len(eigva.sel(band=0).data.reshape(-1))
 
         # Initializing the progress bar
-        potential_sels, reciprocal_sels, coupling_sels, alpha_sels = [], [], [], []
-        
-        # Looping over everything
-        for pots in potential_index:
-            for alphs in alpha_index:
-                for recs in reciprocal_index:
-                    for coups in coupling_index:
-                        # Selecting only one value for each potential dimensions, the selection will be empty if there is no potential dimensions
-                        potential_sels += [(
-                            dict(zip(potential_index.names, pots))
-                            if hasattr(potential_index, "names")
-                            else {}
-                        )]
-                        alpha_sels += [(
-                            dict(zip(alpha_index.names, alphs))
-                            if hasattr(alpha_index, "names")
-                            else {}
-                        )]
-                        reciprocal_sels += [(
-                            dict(zip(reciprocal_index.names, recs))
-                            if hasattr(reciprocal_index, "names")
-                            else {}
-                        )]
-                        coupling_sels += [(
-                            dict(zip(coupling_index.names, coups))
-                            if hasattr(coupling_index, "names")
-                            else {}
-                        )]
-                        
-        sels = [{**p, **r, **c, **a} for p, r, c, a in zip(potential_sels, reciprocal_sels, coupling_sels, alpha_sels)]
+        print("Creating Hamiltonians")
+        Ham_list = []
+        sels = []
+        with tqdm(total=n_tot) as pbar:
+            # Looping over everything
+            for pots in potential_index:
+                for alphs in alpha_index:
+                    for recs in reciprocal_index:
+                        for coups in coupling_index:
+                            # Selecting only one value for each potential dimensions, the selection will be empty if there is no potential dimensions
+                            potential_sel = (
+                                dict(zip(potential_index.names, pots))
+                                if hasattr(potential_index, "names")
+                                else {}
+                            )
+                            alpha_sel = (
+                                dict(zip(alpha_index.names, alphs))
+                                if hasattr(alpha_index, "names")
+                                else {}
+                            )
+                            reciprocal_sel = (
+                                dict(zip(reciprocal_index.names, recs))
+                                if hasattr(reciprocal_index, "names")
+                                else {}
+                            )
+                            coupling_sel = (
+                                dict(zip(coupling_index.names, coups))
+                                if hasattr(coupling_index, "names")
+                                else {}
+                            )
 
-        e, X = eigsh(
-            self.create_hamiltonian(
-                potential_sels[0], alpha_sels[0], reciprocal_sels[0], coupling_sels[0]), 
-            k=n_eigva, 
-            which="SA"
-        )
+                            ham = self.create_hamiltonian(
+                                potential_sel, alpha_sel, reciprocal_sel, coupling_sel
+                            )
 
-        def x(pot_sel, alpha_sel, rec_sel, cou_sel):
-            ham = self.create_hamiltonian(pot_sel, alpha_sel, rec_sel, cou_sel)
-            return eigsh(ham, k=n_eigva, v0=X[:, 0], which="SA")
+                            Ham_list += [ham]
+                            sels += [
+                                {
+                                    **potential_sel,
+                                    **alpha_sel,
+                                    **reciprocal_sel,
+                                    **coupling_sel,
+                                }
+                            ]
+                            pbar.update(1)
+
+        e, X = eigsh(ham, k=n_eigva, which="SM")
+
+        def x(y):
+            return eigsh(y, k=n_eigva, v0=X[:, 0], which="SA")
 
         print("Performing the diagonalization...")
+        
         if parallel:
             parallel = Parallel(n_jobs=n_cores, return_as="list", verbose=5)
-            results = parallel(delayed(x)(p,a,r,c) for p, a, r, c in zip(potential_sels, alpha_sels, reciprocal_sels, coupling_sels))
+            results = parallel(delayed(x)(y) for y in Ham_list)
         else:
             results = []
             with tqdm(total=n_tot) as pbar:
-                for p, a, r, c in zip(potential_sels, alpha_sels, reciprocal_sels, coupling_sels):
-                    results += [x(p,a,r,c)]
+                for ham in Ham_list:
+                    results += [x(ham)]
                     pbar.update(1)
+
 
         print("storing the results")
         with tqdm(total=n_tot) as pbar:
@@ -1027,26 +1165,27 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt  # noqa: E402
     import time as time # noqa: E402
     
-    res = (16, 8)
+    res = (100, 100)
 
     a = 2.5
     a1 = np.array([-(3**0.5) / 2 * a, 3 / 2 * a])  # 1st lattice vector
     a2 = np.array([3**0.5 / 2 * a, 3 / 2 * a])
 
-    # P = Potential([[3, -20], [3, 20]], resolution=res, v0=0)
-    P = Potential([[6, 0], [0, 3]], resolution=res, v0=0)
-    # P = Potential([a1,a2], resolution=res, v0=0)
-    P.V = (P.V.x**2 + P.V.y**2)
+    # P = Potential([[3, -3], [3, 2]], resolution=res, v0=0)
+    # P = Potential([[6, 0], [0, 3]], resolution=res, v0=0)
+    P = Potential([a1,a2], resolution=res, v0=0)
+    P.V = (P.V.x**2 - P.V.y**2/2)
 
-    solv = FDSolver(P, 1)
+    # solv = FDSolver([P,P], [1, 0.5])
+    solv = FDSolver2(P, 1)
     
     
     
-    op = solv.lap
-    # op = solv.compute_hopping(1,0)
-    plt.imshow((op).toarray())
-    plt.colorbar()
-    plt.show()
+    op = solv.dy_sec
+    # op = solv.directional_derivative(1,0)
+    # plt.imshow((op).toarray())
+    # plt.colorbar()
+    # plt.show()
     
     # # op = solv.coupling_context['dx_sec_01']
     Vflat = P.V.data.reshape(-1)
@@ -1054,8 +1193,12 @@ if __name__ == "__main__":
     tpflat = op @ Vflat
     tp = tpflat.reshape(res)
 
+    buf = 4
     fig, ax = plt.subplots()
-    im = ax.pcolormesh(P.x[2:-2, 2:-2], P.y[2:-2, 2:-2], tp[2:-2, 2:-2])
+    im = ax.pcolormesh(
+        P.x[buf:-buf, buf:-buf], 
+        P.y[buf:-buf, buf:-buf], 
+        tp[buf:-buf, buf:-buf])
     plt.colorbar(im)
     ax.set_aspect("equal")
     plt.show()

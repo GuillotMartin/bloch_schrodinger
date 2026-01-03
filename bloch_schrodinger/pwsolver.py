@@ -318,123 +318,6 @@ class PWSolver:
 
         return eigve
 
-    def solve(self, n_eigva: int) -> tuple[xr.DataArray, xr.DataArray]:
-        """Solve the eigenvalue problem at every points of the parameter space, using the scipy.sparse.eigsh function.
-        The eigenvalues and vectors are returned as properly shaped DataArrays.
-
-        Args:
-            n_eigva (int): The number of eigenvalues to compute.
-        Returns:
-            tuple[xr.DataArray]: the eigenvalues and the eigenvectors if keep_vecs is True.
-        """
-
-        # Create empty DataArrays to store the eigenvalues and vectors
-        eigva = self.initialize_eigva(n_eigva)
-        eigve = self.initialize_eigve(n_eigva)
-
-        # Create lists of dimensions. The dimensions are separated by type, for efficient Hamiltonian matrix construction.
-        potential_dims = [
-            dim for dim in self.allcoords if self.allcoords[dim][0] == "potential"
-        ]
-        reciprocal_dims = [
-            dim for dim in self.allcoords if self.allcoords[dim][0] == "reciprocal"
-        ]
-
-        # Intializing indexes to loop over.
-        potential_index, reciprocal_index = (
-            [()],
-            [(0, 0)],
-        )
-
-        # Stacking the dimensions of each type and replacing the associated index. If there is no dimensions of a given type,
-        # the corresponding index is kept as the default defined above
-        if len(potential_dims) > 0:
-            eigva = eigva.stack(potdims=potential_dims)
-            potential_index = eigva.potdims.to_index()
-            eigve = eigve.stack(potdims=potential_dims)
-        if len(reciprocal_dims) > 0:
-            eigva = eigva.stack(recdims=reciprocal_dims)
-            reciprocal_index = eigva.recdims.to_index()
-            eigve = eigve.stack(recdims=reciprocal_dims)
-
-        # The total number of matrix to diagonalize, used for the progress bar
-        n_tot = len(eigva.sel(band=0).data.reshape(-1))
-
-        # Initializing the vector guess. The solver works better with a good guess for the lowest eigenvector
-        X = np.random.rand(self.nGs, n_eigva)
-
-        # Initializing the progress bar
-        with tqdm(total=n_tot) as pbar:
-            count = 0
-
-            # Looping over first the potential dimensions, then the alpha dimensions, then the reciprocal dimensions and finally the coupling dimensions.
-            for pots in potential_index:
-                # Selecting only one value for each potential dimensions, the selection will be empty if there is no potential dimensions
-                potential_sel = (
-                    dict(zip(potential_index.names, pots))
-                    if hasattr(potential_index, "names")
-                    else {}
-                )
-                # The potential is a diagonal matrix, which we stored as a data array.
-                potential_matrix = self.matV.sel(potential_sel).data
-
-                for recs in reciprocal_index:
-                    reciprocal_sel = (
-                        dict(zip(reciprocal_index.names, recs))
-                        if hasattr(reciprocal_index, "names")
-                        else {}
-                    )
-                    if isinstance(self.kx, xr.DataArray):
-                        kxsel = {
-                            key: value
-                            for key, value in reciprocal_sel.items()
-                            if key in self.kx.dims
-                        }
-                        kx = float(self.kx.sel(kxsel).data)
-                    else:
-                        kx = self.kx
-
-                    if isinstance(self.ky, xr.DataArray):
-                        kysel = {
-                            key: value
-                            for key, value in reciprocal_sel.items()
-                            if key in self.ky.dims
-                        }
-                        ky = float(self.ky.sel(kysel).data)
-                    else:
-                        ky = self.ky
-                    kinetic_matrix = self.compute_kinetic([kx, ky])
-
-                    total_sel = {
-                        **potential_sel,
-                        **reciprocal_sel,
-                    }  # aggregating all the values of each selections
-                    mat = kinetic_matrix + potential_matrix
-
-                    with warnings.catch_warnings(record=True):
-                        # "always" makes them get appended to caught so they are not printed
-                        warnings.simplefilter("always")
-                        eigvals, eigvecs = eigsh(mat, k=n_eigva, v0=X[:, 0], which="SA")
-                    idx = eigvals.argsort()
-                    eigvals = eigvals[idx]
-                    eigvecs = eigvecs[:, idx]
-
-                    X = eigvecs
-
-                    eigva.loc[total_sel] = eigvals
-                    eigve.loc[total_sel] = eigvecs
-                    pbar.update(1)
-                    count += 1
-
-        if len(potential_dims) > 0:
-            eigva = eigva.unstack(dim="potdims")
-            eigve = eigve.unstack(dim="potdims")
-        if len(reciprocal_dims) > 0:
-            eigva = eigva.unstack(dim="recdims")
-            eigve = eigve.unstack(dim="recdims")
-
-        return eigva.squeeze(), eigve.squeeze()
-
     def compute_mat(
         self,
         potential_sel: dict,
@@ -479,15 +362,17 @@ class PWSolver:
         mat = potential_matrix + kinetic_matrix
         return mat
 
-    def parallel_solve(
+    def solve(
         self,
         n_eigva: int,
+        parallel:bool = False,
         n_cores: int = -1,
     ) -> tuple[xr.DataArray, xr.DataArray]:
-        """Parallel version of the solve function. It generates first every matrix to solve so be mindful of memory constraints.
+        """Solve the central equation.
 
         Args:
             n_eigva (int): The number of eigenvalues to compute.
+            parallel (bool, optional): Wheter to parallelise the solver with joblib. Default to False.
             n_cores (int, optional): The number of cores to use for the solver, set to -1 to use all cores available. default to -1.
         Returns:
             tuple[xr.DataArray]: the eigenvalues and the eigenvectors.
@@ -526,45 +411,52 @@ class PWSolver:
         n_tot = len(eigva.sel(band=0).data.reshape(-1))
 
         # Initializing the progress bar
-        print("Creating matrices")
-        mat_list = []
         sels = []
-        with tqdm(total=n_tot) as pbar:
-            # Looping over everything
-            for pots in potential_index:
-                for recs in reciprocal_index:
-                    # Selecting only one value for each potential dimensions, the selection will be empty if there is no potential dimensions
-                    potential_sel = (
-                        dict(zip(potential_index.names, pots))
-                        if hasattr(potential_index, "names")
-                        else {}
-                    )
-                    reciprocal_sel = (
-                        dict(zip(reciprocal_index.names, recs))
-                        if hasattr(reciprocal_index, "names")
-                        else {}
-                    )
+        pot_sels = []
+        rec_sels = []
+        # Looping over everything
+        for pots in potential_index:
+            for recs in reciprocal_index:
+                # Selecting only one value for each potential dimensions, the selection will be empty if there is no potential dimensions
+                potential_sel = (
+                    dict(zip(potential_index.names, pots))
+                    if hasattr(potential_index, "names")
+                    else {}
+                )
+                reciprocal_sel = (
+                    dict(zip(reciprocal_index.names, recs))
+                    if hasattr(reciprocal_index, "names")
+                    else {}
+                )
 
-                    mat = self.compute_mat(potential_sel, reciprocal_sel)
+                pot_sels += [potential_sel]
+                rec_sels += [reciprocal_sel]
+                
+                sels += [
+                    {
+                        **potential_sel,
+                        **reciprocal_sel,
+                    }
+                ]
 
-                    mat_list += [mat]
-                    sels += [
-                        {
-                            **potential_sel,
-                            **reciprocal_sel,
-                        }
-                    ]
-                    pbar.update(1)
+        e, X = eigsh(self.compute_mat(potential_sel, reciprocal_sel), k=n_eigva, which="SA")
 
-        e, X = eigsh(mat, k=n_eigva, which="SA")
-
-        def x(y):
-            return eigsh(y, k=n_eigva, v0=X[:, 0], which="SA")
+        def x(p_sel, r_sel):
+            mat = self.compute_mat(p_sel, r_sel)
+            return eigsh(mat, k=n_eigva, v0=X[:, 0], which="SA")
 
         print("Performing the diagonalization...")
-        parallel = Parallel(n_jobs=n_cores, return_as="list", verbose=5)
-        results = parallel(delayed(x)(y) for y in mat_list)
-        # print(results)
+        if parallel:
+            parallel = Parallel(n_jobs=n_cores, return_as="list", verbose=5)
+            results = parallel(delayed(x)(y, z) for y, z in zip(pot_sels, rec_sels))
+        else:
+            results = []
+            with tqdm(total=n_tot) as pbar:
+                for p_sel, r_sel in zip(pot_sels, rec_sels):
+                    results += [x(p_sel, r_sel)]
+                    pbar.update(1)
+        
+        
 
         print("storing the results")
         with tqdm(total=n_tot) as pbar:
