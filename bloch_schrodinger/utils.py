@@ -58,3 +58,36 @@ def create_sliders(arr:xr.DataArray, list_dims:list[str], start:str = 'left')->d
             )
     return sliders_ax
 
+def create_sliders_from_dims(coordinates:dict[xr.DataArray], start:str = 'left')->dict[Union[IntSlider,FloatSlider]]:
+    """Create a dictionnary of sliders from a dictionnary of dimensions.
+
+    Args:
+        coordinates (dict[xr.DataArray]): The dimensions for which to create the sliders.
+        start (str): The default position of sliders, either 'left', 'right' or 'mid'. default to left.
+
+    Returns:
+        dict[FloatSlider]: _description_
+    """
+
+    sliders_ax = {}
+    for dim, coord in coordinates.items():
+        val = coord.min() if start == 'left' else (coord.max()-coord.min())/2
+        islin, step = islinspace(coord)
+        if np.issubdtype(coord.dtype, np.floating):
+            sliders_ax[dim] = FloatSlider(
+                min=float(coord.min()),
+                max=float(coord.max()),
+                step = float((coord.max() - coord.min()) / max(100, len(coord))) if not islin else step,
+                value=float(val),
+                description=dim
+            )
+        else:
+            sliders_ax[dim] = IntSlider(
+                min=coord.min(), 
+                max=coord.max(), 
+                step=1 if not islin else step,
+                value=val, 
+                description=dim
+            )
+    return sliders_ax
+

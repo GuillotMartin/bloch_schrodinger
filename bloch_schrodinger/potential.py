@@ -43,7 +43,7 @@ class Potential:
         resolution: tuple[int, int],
         v0: Union[int, float, complex, np.generic, xr.DataArray] = 100,
         dtype: Union[Type[int], Type[float], Type[complex], Type[np.generic]] = float,
-        endpoint:bool = False
+        endpoint: bool = False,
     ):
         """Initialize a Potential object.
 
@@ -79,8 +79,12 @@ class Potential:
             xr.DataArray(
                 V,
                 coords={
-                    "a1": np.linspace(-0.5, 0.5, resolution[0], endpoint=endpoint),# + 1/resolution[0]/2 * (1-endpoint),
-                    "a2": np.linspace(-0.5, 0.5, resolution[1], endpoint=endpoint),# + 1/resolution[1]/2 * (1-endpoint),
+                    "a1": np.linspace(
+                        -0.5, 0.5, resolution[0], endpoint=endpoint
+                    ),  # + 1/resolution[0]/2 * (1-endpoint),
+                    "a2": np.linspace(
+                        -0.5, 0.5, resolution[1], endpoint=endpoint
+                    ),  # + 1/resolution[1]/2 * (1-endpoint),
                 },
             )
             * v0
@@ -110,10 +114,13 @@ class Potential:
                 "y": self.y,
             }
         )
-        
-        self.da1 = float(abs(self.V.a1[1]-self.V.a1[0]))*(self.a1@self.a1)**0.5 # smallest increment of length along a1
-        self.da2 = float(abs(self.V.a2[1]-self.V.a2[0]))*(self.a2@self.a2)**0.5 # smallest increment of length along a2
 
+        self.da1 = (
+            float(abs(self.V.a1[1] - self.V.a1[0])) * (self.a1 @ self.a1) ** 0.5
+        )  # smallest increment of length along a1
+        self.da2 = (
+            float(abs(self.V.a2[1] - self.V.a2[0])) * (self.a2 @ self.a2) ** 0.5
+        )  # smallest increment of length along a2
 
     def clear(self):
         """Remove all parameter dimensions and features from the potential"""
@@ -254,7 +261,9 @@ class Potential:
             v1 = self.V
             v2 = self.V * mod + value
 
-        self.V = xr.where((abs(x_rot) < dims[0] / 2) * (abs(y_rot) < dims[1] / 2), v1, v2)
+        self.V = xr.where(
+            (abs(x_rot) < dims[0] / 2) * (abs(y_rot) < dims[1] / 2), v1, v2
+        )
 
     def ellipse(
         self,
@@ -342,7 +351,8 @@ class Potential:
             new_potential = Vtmp.sel(sel, method="nearest")
             mesh.set_array(new_potential.data.reshape(-1))
             mesh.set_clim(
-                vmin=kwargs.get("vmin",float(new_potential.min())), vmax=kwargs.get("vmax",float(new_potential.max()))
+                vmin=kwargs.get("vmin", float(new_potential.min())),
+                vmax=kwargs.get("vmax", float(new_potential.max())),
             )
             # ax.set_title(", ".join([f"{d}={sel[d]:.3f}" for d in sel]))
             fig.canvas.draw_idle()
@@ -372,8 +382,8 @@ class Potential:
     def copy(self):
         """Return a copy of the potential"""
         return deepcopy(self)
-    
-    def sel(self, selection:dict)->'Potential':
+
+    def sel(self, selection: dict) -> "Potential":
         """Return a new potential with a subselection of the potential parameter space. See xarray 'sel' method for more infos.
 
         Args:
@@ -382,12 +392,12 @@ class Potential:
         Returns:
             Potential: _description_
         """
-        
+
         new_pot = self.copy()
         new_pot.V = new_pot.V.sel(selection)
         return new_pot
 
-    def smooth(self,smooth_1:float, smooth_2:float, unit:str = 'pixel'):
+    def smooth(self, smooth_1: float, smooth_2: float, unit: str = "pixel"):
         """Smooth the potential by applying a gaussian filter to it (see scipy.ndimage.gaussian_filter). The smoothing strength can be given in pixels or units of a1 and a2.
 
         Args:
@@ -395,23 +405,147 @@ class Potential:
             smooth_2 (float): the smoothing strength along the direction a2
             unit (str, optional): Defines the units to use for the smoothing strength. Can be either 'pixel' or 'space'. Defaults to 'pixel'.
         """
-        if unit == 'space':
+        if unit == "space":
             smooth_1 /= self.da1
             smooth_2 /= self.da2
-        elif unit != 'pixel':
+        elif unit != "pixel":
             raise ValueError("'unit' must either be 'space' or 'pixel'")
-        
-        
-        def filter(arr:xr.DataArray)->xr.DataArray:
-            return gaussian_filter(arr, sigma=(smooth_1,smooth_2)) 
+
+        def filter(arr: xr.DataArray) -> xr.DataArray:
+            return gaussian_filter(arr, sigma=(smooth_1, smooth_2))
 
         smoothed_V = xr.apply_ufunc(
-            filter, 
+            filter,
             self.V,
-            input_core_dims=[['a1', 'a2']], # Telling apply_ufunc not to broadcast on these dimensions
-            output_core_dims=[['a1', 'a2']]
+            input_core_dims=[
+                ["a1", "a2"]
+            ],  # Telling apply_ufunc not to broadcast on these dimensions
+            output_core_dims=[["a1", "a2"]],
         )
         self.V = smoothed_V
+
+    def coarsen(self, factor: tuple[int, int]) -> "Potential":
+        """Return a coarsened version of the Potential, with reduced resolution along a1 and a2.
+
+        Args:
+            factor (tuple[int, int]): The coarsening factor. The initial resolution must be a multiple of the factor.
+
+        Returns:
+            Potential: Coarsened array
+        """
+
+        cpot = self.copy()
+
+        cpot.V = cpot.V.coarsen(a1=factor[0], a2=factor[1]).mean()
+        cpot.resolution = (
+            self.resolution[0] // factor[0],
+            self.resolution[1] // factor[1],
+        )
+
+        cpot.x = self.a1[0] * cpot.V.a1 + self.a2[0] * cpot.V.a2
+        cpot.y = self.a1[1] * cpot.V.a1 + self.a2[1] * cpot.V.a2
+
+        cpot.x = cpot.x.assign_coords(
+            {
+                "x": cpot.x,
+                "y": cpot.y,
+            }
+        )
+        cpot.y = cpot.y.assign_coords(
+            {
+                "x": cpot.x,
+                "y": cpot.y,
+            }
+        )
+
+        # They are also stored directly into the DataArray
+        cpot.V = cpot.V.assign_coords(
+            {
+                "x": cpot.x,
+                "y": cpot.y,
+            }
+        )
+
+        cpot.da1 = (
+            float(abs(cpot.V.a1[1] - cpot.V.a1[0])) * (self.a1 @ self.a1) ** 0.5
+        )  # smallest increment of length along a1
+        cpot.da2 = (
+            float(abs(cpot.V.a2[1] - cpot.V.a2[0])) * (self.a2 @ self.a2) ** 0.5
+        )  # smallest increment of length along a2
+
+        return cpot
+
+    def tile(self, bounds1: tuple[int, int], bounds2: tuple[int, int]) -> "Potential":
+        
+        
+        
+        coords = {dim:self.V.coords[dim] for dim in self.V.dims if dim not in ['a1', 'a2']}
+        
+        reps1 = (bounds1[1]-bounds1[0]) 
+        reps2 = (bounds2[1]-bounds2[0]) 
+        na1, na2 = self.V.sizes['a1'], self.V.sizes['a2']
+        na1_tot = na1 * reps1
+        na2_tot = na2 * reps2
+        
+        coords.update(
+            {'a1':np.linspace(bounds1[0], bounds1[1], na1_tot),
+             'a2':np.linspace(bounds2[0], bounds2[1], na2_tot)}
+        )
+        
+        shape = tuple(
+            [coord.shape[0] for coord in coords.values()]
+        )
+        
+        new_V = xr.DataArray(
+            np.zeros(shape, dtype = self.dtype),
+            coords=coords
+        )
+
+        tot_x = self.a1[0] * new_V.a1 + self.a2[0] * new_V.a2
+        tot_y = self.a1[1] * new_V.a1 + self.a2[1] * new_V.a2
+
+        # Some assignements
+        tot_x = tot_x.assign_coords(
+            {
+                "x": tot_x,
+                "y": tot_y,
+            }
+        )
+        tot_y = tot_y.assign_coords(
+            {
+                "x": tot_x,
+                "y": tot_y,
+            }
+        )
+        
+        new_V = new_V.assign_coords(
+            {"x": tot_x, "y": tot_y}
+        )
+
+        # Loop da loop (sorry)
+        for ia1 in range(reps1):
+            for ia2 in range(reps2):
+                lcR = {
+                    'a1':slice(ia1*na1, (ia1+1)*na1),
+                    'a2':slice(ia2*na2, (ia2+1)*na2)
+                }
+                                
+                new_V[lcR] += self.V.transpose(..., 'a1', 'a2').data
+
+
+        tiled = Potential(
+            unitvecs=[self.a1*reps1, self.a2*reps2],
+            resolution=(na1_tot, na2_tot),
+            v0 = 0,
+            dtype = self.dtype
+        )
+        
+        tiled.V = new_V
+        tiled.x = tot_x
+        tiled.y = tot_y
+        
+        return tiled
+
 
 def honeycomb(
     a: float,
@@ -445,3 +579,14 @@ def honeycomb(
         Honey.circle(centerB, rB, value=0)
 
     return Honey
+
+
+if __name__ == "__main__":
+    dr = create_parameter("dr", [0, 0.1])
+    pot = honeycomb(2.4, 2.75 / 2 - dr, 2.75 / 2 + dr)
+
+    pot_coarse = pot.coarsen((1, 1))
+
+    tiled = pot_coarse.tile([-3,2], [-3,2])
+    
+    tiled.plot()

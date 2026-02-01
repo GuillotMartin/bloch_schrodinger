@@ -367,6 +367,7 @@ class PWSolver:
         n_eigva: int,
         parallel:bool = False,
         n_cores: int = -1,
+        verbose:bool = True
     ) -> tuple[xr.DataArray, xr.DataArray]:
         """Solve the central equation.
 
@@ -374,6 +375,7 @@ class PWSolver:
             n_eigva (int): The number of eigenvalues to compute.
             parallel (bool, optional): Wheter to parallelise the solver with joblib. Default to False.
             n_cores (int, optional): The number of cores to use for the solver, set to -1 to use all cores available. default to -1.
+            verbose (bool, optional): Wheter to inform the user of the solver progress. Default to True.
         Returns:
             tuple[xr.DataArray]: the eigenvalues and the eigenvectors.
         """
@@ -445,31 +447,48 @@ class PWSolver:
             mat = self.compute_mat(p_sel, r_sel)
             return eigsh(mat, k=n_eigva, v0=X[:, 0], which="SA")
 
-        print("Performing the diagonalization...")
+        if verbose: 
+            print("Performing the diagonalization...")
+            
         if parallel:
-            parallel = Parallel(n_jobs=n_cores, return_as="list", verbose=5)
+            parallel = Parallel(n_jobs=n_cores, return_as="list", verbose = 5 if verbose else 0)
             results = parallel(delayed(x)(y, z) for y, z in zip(pot_sels, rec_sels))
         else:
             results = []
-            with tqdm(total=n_tot) as pbar:
+            if verbose:
+                with tqdm(total=n_tot) as pbar:
+                    for p_sel, r_sel in zip(pot_sels, rec_sels):
+                        results += [x(p_sel, r_sel)]
+                        pbar.update(1)
+            else:
                 for p_sel, r_sel in zip(pot_sels, rec_sels):
-                    results += [x(p_sel, r_sel)]
+                        results += [x(p_sel, r_sel)]
+        
+        
+
+        if verbose:
+            print("storing the results")
+            with tqdm(total=n_tot) as pbar:
+                for i in range(n_tot):
+                    eigvals, eigvecs = results[i][0], results[i][1]
+
+                    idx = eigvals.argsort()
+                    eigvals = eigvals[idx]
+                    eigvecs = eigvecs[:, idx]
+
+                    eigva.loc[sels[i]] = eigvals
+                    eigve.loc[sels[i]] = eigvecs
                     pbar.update(1)
-        
-        
-
-        print("storing the results")
-        with tqdm(total=n_tot) as pbar:
+        else:
             for i in range(n_tot):
-                eigvals, eigvecs = results[i][0], results[i][1]
+                    eigvals, eigvecs = results[i][0], results[i][1]
 
-                idx = eigvals.argsort()
-                eigvals = eigvals[idx]
-                eigvecs = eigvecs[:, idx]
+                    idx = eigvals.argsort()
+                    eigvals = eigvals[idx]
+                    eigvecs = eigvecs[:, idx]
 
-                eigva.loc[sels[i]] = eigvals
-                eigve.loc[sels[i]] = eigvecs
-                pbar.update(1)
+                    eigva.loc[sels[i]] = eigvals
+                    eigve.loc[sels[i]] = eigvecs
 
         if len(potential_dims) > 0:
             eigva = eigva.unstack(dim="potdims")
@@ -485,7 +504,8 @@ class PWSolver:
         eigve: xr.DataArray, 
         x: xr.DataArray = None, 
         y: xr.DataArray = None,
-        vectorized:bool = False
+        vectorized:bool = False,
+        phase0 = (0.01,0.01)
     ) -> xr.DataArray:
         """Compute the spatial shape of the eigenvectors from their plane-wave expression
 
@@ -506,14 +526,19 @@ class PWSolver:
         
         if vectorized:
             u = (
-                eigve * np.exp(1j * (eigve.pwkx * x + eigve.pwky * y))
+                eigve * np.exp(-1j * (eigve.pwkx * x + eigve.pwky * y))
             ).sum('g')
             print(end = '\r')
         else:
             print('summing...')
             u = 0
             for ig in trange(eigve.sizes['g']):
-                u += eigve[{'g':ig}] * np.exp(1j * (eigve.pwkx[{'g':ig}] * x + eigve.pwky[{'g':ig}] * y))
+                u += eigve[{'g':ig}] * np.exp(-1j * (eigve.pwkx[{'g':ig}] * x + eigve.pwky[{'g':ig}] * y))
+        
+        sel0 = dict(a1=phase0[0], a2=phase0[1])
+        u *= xr.ufuncs.exp(
+            -1j * xr.ufuncs.angle(u.sel(sel0, method="nearest"))
+        )
         
         return u / (abs(u)**2).sum(['a1', 'a2'])**0.5
     

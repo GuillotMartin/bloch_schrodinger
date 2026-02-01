@@ -111,8 +111,8 @@ class FDSolver:
         self.a2 = self.potentials[0].a2  # The second lattice vector
         self.e1 = self.a1 / (self.a1 @ self.a1) ** 0.5  # normalized lattice vector
         self.e2 = self.a2 / (self.a2 @ self.a2) ** 0.5  # normalized lattice vector
-        self.na1 = len(self.potentials[0].V.a1.data)  # discretization along a1
-        self.na2 = len(self.potentials[0].V.a2.data)  # discretization along a2
+        self.na1 = self.potentials[0].V.sizes['a1']  # discretization along a1
+        self.na2 = self.potentials[0].V.sizes['a2']  # discretization along a2
         self.np = self.na1 * self.na2  # Number of mesh sampling points
 
         self.n = (
@@ -954,7 +954,7 @@ class FDSolver:
             ham = self.create_hamiltonian(pot_sel, alpha_sel, rec_sel, cou_sel)
             return eigsh(ham, k=n_eigva, v0=X[:, 0], which="SA")
 
-        print("Performing the diagonalization...")
+        print(f"Performing {n_tot} diagonalizations...")
         if parallel:
             parallel = Parallel(n_jobs=n_cores, return_as="list", verbose=5)
             results = parallel(delayed(x)(p,a,r,c) for p, a, r, c in zip(potential_sels, alpha_sels, reciprocal_sels, coupling_sels))
