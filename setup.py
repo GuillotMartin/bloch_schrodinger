@@ -36,6 +36,7 @@ REQUIRED = [
     'ipympl',
     'tqdm',
     'joblib',
+    'cmcrameri',
 ]
 
 # What packages are optional?
