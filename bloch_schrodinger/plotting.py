@@ -48,7 +48,7 @@ def get_template(name:str)->dict:
     contours = {
         "levels": 1, 
         "colors": 'white', 
-        "linewidths": 0.5, 
+        "linewidths": 0.3, 
         "linestyles": 'dashed',
     }
     
@@ -209,6 +209,7 @@ def plot_eigenvector(
             cmap = template['colormap'],
             norm = norm,
             **template["pcolormeshkwargs"],
+            rasterized = True
         )
         
         if 'clim' in template:

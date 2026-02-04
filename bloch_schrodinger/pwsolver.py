@@ -153,7 +153,6 @@ class PWSolver:
         index = xr.DataArray(
             [indx, jndx], coords={"ij": np.arange(2), "g": np.arange(len(indx))}
         )
-
         self.kindex = index.assign_coords(
             {  # The position in k-space (coords and cartesian) of each vector G
                 "pwkx": self.pwkx[index.sel(ij=0), index.sel(ij=1)],
@@ -448,10 +447,10 @@ class PWSolver:
             return eigsh(mat, k=n_eigva, v0=X[:, 0], which="SA")
 
         if verbose: 
-            print("Performing the diagonalization...")
+            print(f"Performing {n_tot} diagonalizations...")
             
         if parallel:
-            parallel = Parallel(n_jobs=n_cores, return_as="list", verbose = 5 if verbose else 0)
+            parallel = Parallel(n_jobs=min(n_cores, n_tot), return_as="list", verbose = 5 if verbose else 0)
             results = parallel(delayed(x)(y, z) for y, z in zip(pot_sels, rec_sels))
         else:
             results = []
@@ -520,101 +519,82 @@ class PWSolver:
             xr.DataArray
         """
         if x is None:
-            x = self.potential.x - self.potential.a1[0]
+            x = self.potential.x - (self.potential.a1[0] + self.potential.a2[0])/2
         if y is None:
-            y = self.potential.y
+            y = self.potential.y - (self.potential.a1[1] + self.potential.a2[1])/2
         
         if vectorized:
             u = (
-                eigve * np.exp(-1j * (eigve.pwkx * x + eigve.pwky * y))
+                eigve * np.exp(1j * (eigve.pwkx * x + eigve.pwky * y))
             ).sum('g')
             print(end = '\r')
         else:
             print('summing...')
             u = 0
             for ig in trange(eigve.sizes['g']):
-                u += eigve[{'g':ig}] * np.exp(-1j * (eigve.pwkx[{'g':ig}] * x + eigve.pwky[{'g':ig}] * y))
+                u += eigve[{'g':ig}] * np.exp(1j * (eigve.pwkx[{'g':ig}] * x + eigve.pwky[{'g':ig}] * y))
         
-        sel0 = dict(a1=phase0[0], a2=phase0[1])
-        u *= xr.ufuncs.exp(
-            -1j * xr.ufuncs.angle(u.sel(sel0, method="nearest"))
-        )
+        # sel0 = dict(a1=phase0[0], a2=phase0[1])
+        # u *= xr.ufuncs.exp(
+        #     -1j * xr.ufuncs.angle(u.sel(sel0, method="nearest"))
+        # ).conj()
         
-        return u / (abs(u)**2).sum(['a1', 'a2'])**0.5
+        return u.conj() / (abs(u)**2).sum(['a1', 'a2'])**0.5
     
     
 
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt  # noqa: E402
-    import time as time  # noqa: E402
-    from bloch_schrodinger.potential import create_parameter
-    from bloch_schrodinger.plotting import plot_cuts, plot_eigenvector
-    # First, we define a few constants
+    from bloch_schrodinger.plotting import plot_eigenvector, get_template  # noqa: E402
 
-    kl = 2
-    a = 4 * np.pi / 3**1.5 / kl
-    a1 = np.array([3 * a / 2, -(3**0.5) * a / 2])  # 1st lattice vector
-    a2 = np.array([3 * a / 2, 3**0.5 * a / 2])  # 2nd lattice vector
+    
+    lam = 2
+    kl = 2*np.pi / lam
 
-    b1 = 3**0.5 * kl * np.array([1, -(3**0.5)]) / 2
-    b2 = 3**0.5 * kl * np.array([1, 3**0.5]) / 2
+    alpha = 0
+    epsilon = 1
+    eta = 1
 
-    m = 1
-    hbar = 1
-    E_r = hbar**2 * kl**2 / 2 / m
-    s1 = 20
-    s2 = s1 + create_parameter("delta", np.linspace(-0.5, 0.5, 5))
+    theta = np.pi/2 + np.pi/21
+    # theta = np.pi/2
 
-    k1 = kl * np.array([-(3**0.5) / 2, 1 / 2])
-    k2 = kl * np.array([3**0.5 / 2, 1 / 2])
-    k3 = kl * np.array([0, -1])
+    a1 = np.array([1, 0])*2**0.5/2 * lam
+    a2 = np.array([0, 1])*2**0.5/2 * lam
 
-    a1s = np.array([-1, 3**0.5]) * 2 * np.pi / 3 / a
-    a2s = np.array([1, 3**0.5]) * 2 * np.pi / 3 / a
-    K = np.array([0, 4 * np.pi / 3**1.5 / a])
+    b1 = a2 * np.pi * 2 / lam**2
+    b2 = a1 * np.pi * 2 / lam**2
 
-    klim = 1
+    klim = kl
     na1 = 64
     na2 = 64
 
-    V1 = -s2 * E_r
-    V2 = -s1 * E_r
-
-    honeycomb = Potential(
-        unitvecs=[a1, a2],
-        resolution=(na1, na2),
-        v0=50,
+    V0 = 20
+    
+    checker = Potential(
+        unitvecs = [a1, a2],
+        resolution = (na1, na2),
+        v0 = 0,
     )
 
-    dirs = [
-        k1[0] * (honeycomb.x - a1[0]) + k1[1] * honeycomb.y,
-        k2[0] * (honeycomb.x - a1[0]) + k2[1] * honeycomb.y,
-        k3[0] * (honeycomb.x - a1[0]) + k3[1] * honeycomb.y,
-    ]
+    xmy = (checker.x - checker.y)/2**0.5 - 1/4 * lam
+    xpy = (checker.x + checker.y)/2**0.5
 
-    for i in range(3):
-        honeycomb.add(2 * V1 * np.cos((dirs[i - 1] - dirs[i]) - 2 * np.pi / 3) / 2)
-        honeycomb.add(2 * V2 * np.cos((dirs[i - 1] - dirs[i]) + 2 * np.pi / 3) / 2)
-
-    # honeycomb.plot()
-    # plt.show()
-
-    alp = 1
-    pw = PWSolver(honeycomb, alp)
-
-    pw.create_reciprocal_grid(
-        ky=np.linspace(-5, 5, 51),
-        kx=0,
+    checker.set(
+        -V0/4 * abs(
+            eta * ( np.exp(1j * kl * (xmy)) + epsilon * np.exp(-1j * kl * (xmy))) +
+            np.exp(1j * theta) * (np.exp(1j * kl * xpy) + epsilon * np.exp(-1j * kl * xpy))
+        )**2
     )
-    eigva, eigve = pw.parallel_solve(2)
+    
+    
+    pw = PWSolver(checker, 1/2, 500)
+    
+    eigva, eigve = pw.solve(2)
 
-    u = pw.compute_u(eigve, vectorized=False)
-
-    plot_cuts(eigva, "ky")
-    plt.show()
+    u = pw.compute_u(eigve)
     
     plot_eigenvector(
-        [[abs(u)**2]], [[honeycomb]], [['amplitude']]
+        [[abs(u)**2]], [[checker]], [['amplitude']]
     )
     plt.show()

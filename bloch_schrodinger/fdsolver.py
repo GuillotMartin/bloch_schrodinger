@@ -956,7 +956,7 @@ class FDSolver:
 
         print(f"Performing {n_tot} diagonalizations...")
         if parallel:
-            parallel = Parallel(n_jobs=n_cores, return_as="list", verbose=5)
+            parallel = Parallel(n_jobs=min(n_cores, n_tot), return_as="list", verbose=5)
             results = parallel(delayed(x)(p,a,r,c) for p, a, r, c in zip(potential_sels, alpha_sels, reciprocal_sels, coupling_sels))
         else:
             results = []
@@ -1027,15 +1027,15 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt  # noqa: E402
     import time as time # noqa: E402
     
-    res = (16, 8)
+    res = (16, 12)
 
     a = 2.5
     a1 = np.array([-(3**0.5) / 2 * a, 3 / 2 * a])  # 1st lattice vector
     a2 = np.array([3**0.5 / 2 * a, 3 / 2 * a])
 
     # P = Potential([[3, -20], [3, 20]], resolution=res, v0=0)
-    P = Potential([[6, 0], [0, 3]], resolution=res, v0=0)
-    # P = Potential([a1,a2], resolution=res, v0=0)
+    # P = Potential([[6, 0], [0, 3]], resolution=res, v0=0)
+    P = Potential([a1,a2], resolution=res, v0=0)
     P.V = (P.V.x**2 + P.V.y**2)
 
     solv = FDSolver(P, 1)

@@ -81,10 +81,10 @@ class Potential:
                 coords={
                     "a1": np.linspace(
                         -0.5, 0.5, resolution[0], endpoint=endpoint
-                    ),  # + 1/resolution[0]/2 * (1-endpoint),
+                    ) + 1/resolution[0]/2 * (1-endpoint),
                     "a2": np.linspace(
                         -0.5, 0.5, resolution[1], endpoint=endpoint
-                    ),  # + 1/resolution[1]/2 * (1-endpoint),
+                    ) + 1/resolution[1]/2 * (1-endpoint),
                 },
             )
             * v0
@@ -425,7 +425,7 @@ class Potential:
         self.V = smoothed_V
 
     def coarsen(self, factor: tuple[int, int]) -> "Potential":
-        """Return a coarsened version of the Potential, with reduced resolution along a1 and a2.
+        """Return a coarsened copy of the Potential, with reduced resolution along a1 and a2.
 
         Args:
             factor (tuple[int, int]): The coarsening factor. The initial resolution must be a multiple of the factor.
@@ -476,8 +476,15 @@ class Potential:
         return cpot
 
     def tile(self, bounds1: tuple[int, int], bounds2: tuple[int, int]) -> "Potential":
-        
-        
+        """Return a copy of the potential extended over multiple unit cells by tiling the original pattern.
+
+        Args:
+            bounds1 (tuple[int, int]): Numbers of cells along a1
+            bounds2 (tuple[int, int]): Number of cells along a2
+
+        Returns:
+            Potential
+        """
         
         coords = {dim:self.V.coords[dim] for dim in self.V.dims if dim not in ['a1', 'a2']}
         
@@ -488,8 +495,8 @@ class Potential:
         na2_tot = na2 * reps2
         
         coords.update(
-            {'a1':np.linspace(bounds1[0], bounds1[1], na1_tot),
-             'a2':np.linspace(bounds2[0], bounds2[1], na2_tot)}
+            {'a1':np.linspace(bounds1[0]-1/2, bounds1[1]-1/2, na1_tot, endpoint=False),
+             'a2':np.linspace(bounds2[0]-1/2, bounds2[1]-1/2, na2_tot, endpoint=False)}
         )
         
         shape = tuple(

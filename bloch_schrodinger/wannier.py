@@ -43,7 +43,15 @@ class Wannier:
         resolution: tuple[int, int],
         method: str = 'pw'
         ):
-        
+        """Initialize a Wannier object. This class allows the determination of the MLWFs for a whole parameter space.
+
+        Args:
+            Potential (Potential): The potential to use for the Bloch function computation 
+            alpha (Union[float, xr.DataArray]): The kinetic term
+            rec_vecs (list[list[float, float]]): The reciprocal vectors of the unit cell, given as [b1, b2] with bi a size-2 list or array.
+            resolution (tuple[int, int]): The resolution for the k-space Monkhorst-Pack grid used. 
+            method (str, optional): The Bloch-Schrödinger solver to use. Either 'pw' for plane waves or 'fd' for finite differences. Defaults to 'pw'.
+        """
         self.potential = Potential
         self.alpha = alpha
         self.method = method
@@ -216,8 +224,8 @@ class Wannier:
             wi = np.where(i + delta_i < 0, -1, np.where(i + delta_i >= self.nb1, 1, 0))
             wj = np.where(j + delta_j < 0, -1, np.where(j + delta_j >= self.nb2, 1, 0))
             
-            Gx = wi * a1s[0] + wj * a2s[0]
-            Gy = wi * a1s[1] + wj * a2s[1]
+            Gx = wi * self.b1[0] + wj * self.b2[0]
+            Gy = wi * self.b1[1] + wj * self.b2[1]
             
             phase = np.exp(1j * (Gx[:,:,None,None] * u_mk.x.data[None,None,:,:] + Gy[:,:,None,None] * u_mk.y.data[None,None,:,:]))
             u_nkpb *= phase[None,:,:,:,:]
@@ -292,12 +300,12 @@ class Wannier:
         
         g_n = xr.DataArray(
             np.zeros((self.n_wannier, u_mk.sizes['a1'], u_mk.sizes['a2'])),
-            coords = {'n':np.arange(2), 'a1':u_mk.a1, 'a2':u_mk.a2}
+            coords = {'n':np.arange(self.n_wannier), 'a1':u_mk.a1, 'a2':u_mk.a2}
         )
         
         for i in range(self.n_wannier):
             gauss = np.exp(
-                - ((u_mk.x - centers[0][i])**2 + (u_mk.y - centers[1][i])**2) / 2 / sigma**2
+                - ((u_mk.x - centers[0][i])**2 + (u_mk.y - centers[1][i])**2) / 2 / (sigma*uniform(0.5, 2))**2
             )
             gauss /= (gauss**2).sum(["a1", "a2"])
             g_n[{'n':i}] = gauss
@@ -403,8 +411,20 @@ class Wannier:
         parallel: bool = False,
         n_cores: int = -1,
         blockwargs: dict = {}, 
-        tol = 1e-7):
+        tol = 1e-7)->xr.DataArray:
+        """Finds the proper unitary matrix U_mnk to compute the MLWFs at each point in parameter space.
 
+        Args:
+            n_wannier (int): The number of Bloch eigenvectors and thus WFs to compute.
+            centers (list[list[float]]): The centers of the WFs, given as [[x0, ..., xN], [y0, ..., yN]].
+            parallel (bool, optional): Wheter to parallelize the whole function. Defaults to False.
+            n_cores (int, optional): Numbers of cores to use in case of parallelization. Defaults to -1.
+            blockwargs (dict, optional): Arguments to pass on to the Bloch-Schrödinger solver constructor function. Defaults to {}.
+            tol (_type_, optional): The tolreance for the gradient descent finding U_mnk. Defaults to 1e-7.
+
+        Returns:
+            xr.DataArray: The unitary matrix U_mnk with additional parameter dimensions.
+        """
         print("Computing the Bloch functions...")
         self.compute_bloch(n_wannier, **blockwargs)
         
@@ -440,14 +460,18 @@ class Wannier:
             } 
             for tup in zip(*indexGrid)
         ]
+        
+        if len(selections) == 0:
+            selections = [{}]
+        
         n_tot = len(selections)
                 
         def f(x):
             return self.compute_U_mnk(x, centers, tol)
         
-        print(f"Computing {n_tot} Wannier functions")
+        print(f"Computing {n_tot} sets of Wannier functions")
         if parallel:
-            parallel = Parallel(n_jobs=n_cores, return_as="list", verbose = 5)
+            parallel = Parallel(n_jobs=min(n_cores, n_tot), return_as="list", verbose = 5)
             results = parallel(delayed(f)(x) for x in selections)
         else:
             results = []
@@ -468,15 +492,27 @@ class Wannier:
         bounds2: tuple[int, int],
         coarsen: tuple[int, int] = (1,1),
         )->tuple[Potential, xr.DataArray]:
-        
+        """Compute the WFs profiles from a given unitary matrix.
+
+        Args:
+            U_mnk (xr.DataArray): The unitary matrix to use, its dimensions must match those of the corresponding Bloch vectors.
+            bounds1 (tuple[int, int]): The number of unit cells along a1 over which to extend the WFs computation.
+            bounds2 (tuple[int, int]): The number of unit cells along a2 over which to extend the WFs computation.
+            coarsen (tuple[int, int], optional): Wheter to coarsen the resolution of the mode profile. The coarsening factors must be dividers of na1 and na2. 
+            See xarray coarsen function for more infos. Defaults to (1,1).
+
+        Returns:
+            tuple[Potential, xr.DataArray]: The extended potential for plotting/Hamiltonian computation as well as the MLWFs profiles.
+        """
         if coarsen != (1,1):
             coarse_eig = self.eigve.coarsen(
                 a1 = coarsen[0],
                 a2 = coarsen[1],
+                coord_func='min'
             ).mean()
         else:
             coarse_eig = self.eigve
-        
+            
         na1_coarse = self.potential.resolution[0] // coarsen[0]
         na2_coarse = self.potential.resolution[1] // coarsen[1]
         na1_tot = na1_coarse * (bounds1[1]-bounds1[0]) 
@@ -485,8 +521,8 @@ class Wannier:
         coords = {dim:coarse_eig.coords[dim] for dim in coarse_eig.dims if dim not in ['a1', 'a2', 'kb1', 'kb2']}
 
         coords.update(
-            {'a1':np.linspace(bounds1[0], bounds1[1], na1_tot),
-             'a2':np.linspace(bounds2[0], bounds2[1], na2_tot)}
+            {'a1':np.linspace(bounds1[0]-1/2, bounds1[1]-1/2, na1_tot, endpoint=False) + 1/na1_coarse/2,
+             'a2':np.linspace(bounds2[0]-1/2, bounds2[1]-1/2, na2_tot, endpoint=False) + 1/na2_coarse/2}
         )
         
         shape = tuple(
@@ -505,14 +541,17 @@ class Wannier:
             {"x": tot_x, "y": tot_y}
         )
         
+        print("Computing the mode profiles...")
         for ikb1 in trange(self.eigve.sizes['kb1']):
             for ikb2 in range(self.eigve.sizes['kb2']):
                 for ia1 in range(bounds1[1]-bounds1[0]):
                     for ia2 in range(bounds2[1]-bounds2[0]):
+                        
                         lcR = {
                             'a1':slice(ia1*na1_coarse, (ia1+1)*na1_coarse),
                             'a2':slice(ia2*na2_coarse, (ia2+1)*na2_coarse)
                         }
+                        
                         
                         lcK = {
                             'kb1':ikb1,
@@ -528,53 +567,86 @@ class Wannier:
                         coarse_eig.coords['a1'] = x.a1
                         coarse_eig.coords['a2'] = x.a2
                         
-                        phase = np.exp(-1j * (kx * x + ky * y))                        
+                        phase = np.exp(-1j * (kx * x + ky * y))
                         tmp = 0
                         for i in range(U_mnk.sizes['m']):
                             tmp += (U_mnk[lcK] * coarse_eig[lcK])[{'m':i}]
-                            
-                        tmp = tmp * phase                    
+                        tmp = tmp * phase
+                        
+                        # tmp = coarse_eig[lcK] * phase
+                                                                    
                         wannier[lcR] += tmp.data
-        
+
+        wannier = wannier.rename({"m":"n"})
         wannier = wannier / (abs(wannier) ** 2).sum(["a1", "a2"]) ** 0.5
         tiled_pot = self.potential.coarsen(coarsen).tile(bounds1, bounds2)
         
         return tiled_pot, wannier
         
         
-from bloch_schrodinger.potential import honeycomb  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
-from bloch_schrodinger.plotting import plot_eigenvector, get_template  # noqa: E402
 
 if __name__ == '__main__':
     
-    a = 2.4
-    r = 2.75/2
-    dr = create_parameter('dr', np.linspace(-0.1, 0.0, 2))
+    import matplotlib.pyplot as plt  # noqa: E402
+    from bloch_schrodinger.plotting import plot_eigenvector, get_template  # noqa: E402
 
-    a1 = np.array([-(3**0.5) * a/2, 3 * a/2])  # 1st lattice vector
-    a2 = np.array([3**0.5 * a/2, 3 * a/2])  # 2nd lattice vector
     
-    a1s = 2 * np.pi / 3 / a * np.array([3**0.5, -1])
-    a2s = 2 * np.pi / 3 / a * np.array([3**0.5, 1])
+    kl = 2
+    a = 4*np.pi / 3**1.5 / kl
+    a1 = np.array([3 * a/2, -(3**0.5) * a/2])  # 1st lattice vector
+    a2 = np.array([3 * a/2, 3**0.5 * a/2])  # 2nd lattice vector
 
+    b1 = 3**0.5 * kl * np.array([1, -3**0.5])/2
+    b2 = 3**0.5 * kl * np.array([1, 3**0.5])/2
+
+    m = 1
+    hbar = 1
+    E_r = hbar**2 * kl**2 / 2 / m
+    s1 = 9
+    s2 = 10
+
+    k1 = kl * np.array([-3**0.5 / 2 , 1/2])
+    k2 = kl * np.array([3**0.5 / 2 , 1/2])
+    k3 = kl * np.array([0,-1])
+
+    a1s = np.array([-1, 3**0.5])*2*np.pi/3/a 
+    a2s = np.array([1, 3**0.5])*2*np.pi/3/a
+    K = np.array([0, 4*np.pi/3**1.5/a])
+
+
+    klim = 1
     na1 = 64
     na2 = 64
     
     centers = [
-        [0, 0], [-a/2, a/2]
+        [-a/2, a/2], [0, 0]
     ]
 
-    honey = honeycomb(
-        a = a, rA = r - dr, rB= r + dr, res=(na1, na2), v0 = 600
+    V1 = -s2*E_r
+    V2 = -s1*E_r
+
+    honeycomb = Potential(
+        unitvecs = [a1, a2],
+        resolution = (na1, na2),
+        v0 = 0,
     )
 
+    dirs = [
+        k1[0] * (honeycomb.x - a1[0]) + k1[1] * honeycomb.y,
+        k2[0] * (honeycomb.x - a1[0]) + k2[1] * honeycomb.y,
+        k3[0] * (honeycomb.x - a1[0]) + k3[1] * honeycomb.y,
+    ]
+
+    for i in range(3):
+        honeycomb.add(2*V1*np.cos((dirs[i-1]-dirs[i]) - 2*np.pi/3)/2)
+        honeycomb.add(2*V2*np.cos((dirs[i-1]-dirs[i]) + 2*np.pi/3)/2)
+
     foo = Wannier(
-        Potential=honey,
+        Potential=honeycomb,
         alpha = 1/2,
         rec_vecs=[a1s, a2s],
         resolution=(15,15),
-        method='fd'
+        method='pw'
     )
     
     
@@ -589,19 +661,34 @@ if __name__ == '__main__':
     
     #%%
 
-    amplog = get_template('amplitude')
-    amplog['contourkwargs']['levels'] = [1]
-    # amplog['autoscale'] = False
-    # amplog['clim'] = (1e-12, 1e-1)
+    amplog = get_template('amplitude - log')
+    # amplog['contourkwargs']['levels'] = [10]
+    amplog['autoscale'] = False
+    amplog['clim'] = (1e-12, 1e-1)
 
-    reallog = get_template('real - log')
-    reallog['contourkwargs']['levels'] = [1]
-    reallog['autoscale'] = False
-    reallog['clim'] = (-1e-1, 1e-1)
+    reallog = get_template('real')
+    # reallog['contourkwargs']['levels'] = [1]
+    # reallog['autoscale'] = False
+    # reallog['clim'] = (-1e-1, 1e-1)
     
     fig, ax = plot_eigenvector(
-        [[abs(wannier)**2, wannier.real]], [[pot, pot]], [[amplog, reallog]]
+        [[abs(wannier)**2]], [[pot]], [[amplog]]
     )
     plt.show()
+    
+    
+    # bar = PWSolver(
+    #     honeycomb, 1/2, 300
+    # )
+    
+    # eigva, eigve = bar.solve(2)
+    
+    # eigve = bar.compute_u(eigve)
+    
+    # fig, ax = plot_eigenvector(
+    #     [[abs(eigve)**2]], [[honeycomb]], [['amplitude']]
+    # )
+    # plt.show()
+    
 
 # %%
