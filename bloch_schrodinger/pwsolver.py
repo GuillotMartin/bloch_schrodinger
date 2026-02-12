@@ -166,10 +166,10 @@ class PWSolver:
             [self.na1 // 2, self.na2 // 2], coords={"ij": np.arange(2)}
         )
 
-        connect = index - index.rename({"g": "gp"}) + center
+        self.connect = index - index.rename({"g": "gp"}) + center
 
         self.matV = self.fV.loc[  # The potential part of the matrix M_{GG'}
-            {"pwka1": connect.sel(ij=0), "pwka2": connect.sel(ij=1)}
+            {"pwka1": self.connect.sel(ij=0), "pwka2": self.connect.sel(ij=1)}
         ]
 
     def compute_kinetic(self, k: tuple[float, float]) -> np.ndarray:

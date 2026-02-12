@@ -71,7 +71,7 @@ def create_sliders_from_dims(coordinates:dict[xr.DataArray], start:str = 'left')
 
     sliders_ax = {}
     for dim, coord in coordinates.items():
-        val = coord.min() if start == 'left' else (coord.max()-coord.min())/2
+        val = coord.min().item() if start == 'left' else (coord.max().item()-coord.min().item())/2
         islin, step = islinspace(coord)
         if np.issubdtype(coord.dtype, np.floating):
             sliders_ax[dim] = FloatSlider(

@@ -200,11 +200,10 @@ class Wannier:
         Returns:
             xr.DataArray: M_mnkb
         """
-        nbands = self.n_wannier # shorter names
         nb = self.stencil_size # shorter names
 
         M_mnkb = xr.DataArray(
-            np.zeros((nbands, nbands, self.nb1, self.nb1, nb), dtype=np.complex128),
+            np.zeros((self.nbands, self.nbands, self.nb1, self.nb1, nb), dtype=np.complex128),
             dims=['m','n','kb1','kb2','b']
         )
 
@@ -284,28 +283,28 @@ class Wannier:
 
         return nM
 
-    def guess(self, u_mk:xr.DataArray, centers)->xr.DataArray:
+    def guess(self, u_mk:xr.DataArray, centers:list[list[float, float]])->xr.DataArray:
         """Initialize a matrix U_mnk0 by using gaussian functions.
 
         Args:
             u_mk (xr.DataArray): The initial eigenvector set
-            centers (_type_): The centers of each wannier functions as [x_list, y_list]
+            centers (list[list[float, float]]): The centers of each wannier functions
 
         Returns:
-            xr.DataArray: _description_
+            xr.DataArray
         """
         # Taking random points for the centers
         
         sigma = self.potential.a1@self.potential.a1 / 10 # A reasonable spread
         
         g_n = xr.DataArray(
-            np.zeros((self.n_wannier, u_mk.sizes['a1'], u_mk.sizes['a2'])),
-            coords = {'n':np.arange(self.n_wannier), 'a1':u_mk.a1, 'a2':u_mk.a2}
+            np.zeros((self.nbands, u_mk.sizes['a1'], u_mk.sizes['a2'])),
+            coords = {'n':np.arange(self.n_wannier[0], self.n_wannier[1]), 'a1':u_mk.a1, 'a2':u_mk.a2}
         )
         
-        for i in range(self.n_wannier):
+        for i in range(self.nbands):
             gauss = np.exp(
-                - ((u_mk.x - centers[0][i])**2 + (u_mk.y - centers[1][i])**2) / 2 / (sigma*uniform(0.5, 2))**2
+                - ((u_mk.x - centers[i][0])**2 + (u_mk.y - centers[i][1])**2) / 2 / (sigma*uniform(0.5, 2))**2
             )
             gauss /= (gauss**2).sum(["a1", "a2"])
             g_n[{'n':i}] = gauss
@@ -325,7 +324,7 @@ class Wannier:
         
         return U_mnk0
                     
-    def compute_bloch(self, n_wannier, **kwargs)->xr.DataArray:
+    def compute_bloch(self, **kwargs)->xr.DataArray:
         """Compute the Bloch eigenvectors necessary to the determination of the MLWFs.
 
         Args:
@@ -335,30 +334,28 @@ class Wannier:
             xr.DataArray: The bloch eigenvectors
         """
         
-        self.n_wannier = n_wannier
         if self.method == 'pw':
             solv = PWSolver(
                 self.potential, self.alpha, **kwargs
             )
             
             solv.set_reciprocal_space(self.kx, self.ky)
-            eigva, eigve = solv.solve(n_wannier, parallel=True, n_cores = -1)
+            eigva, eigve = solv.solve(self.n_wannier[1], parallel=True, n_cores = -1)
             eigve = solv.compute_u(eigve)
         
         elif self.method == 'fd':
             solv = FDSolver(self.potential, self.alpha)
             solv.set_reciprocal_space(self.kx, self.ky)
-            eigva, eigve = solv.solve(n_wannier, parallel=True, n_cores = -1)
+            eigva, eigve = solv.solve(self.n_wannier[1], parallel=True, n_cores = -1)
 
         else:
             raise ValueError("Method must either be 'pw' or 'fd'")
         
-        if n_wannier == 1:
+        if self.n_wannier[1] == 1:
             eigve = eigve.expand_dims('band')
         
-        self.eigve = eigve.transpose(... , 'band', 'kb1', 'kb2','a1','a2').rename({'band':'m'})
+        self.eigve = eigve.transpose(... , 'band', 'kb1', 'kb2','a1','a2').rename({'band':'m'})[{'m':slice(self.n_wannier[0], None)}]
 
-    
     def compute_U_mnk(self, sel:dict, centers:list[list[float]], tol:float)->xr.DataArray:
         """Determine the MLWFs for a given collection of eigenvectors u_mk at a given parameter space point 'sel',
         using a basic gradient descent algorithm.
@@ -406,7 +403,7 @@ class Wannier:
     
     def solve(
         self, 
-        n_wannier: int,
+        n_wannier: Union[int, tuple[int, int]],
         centers:list[list[float]],
         parallel: bool = False,
         n_cores: int = -1,
@@ -415,7 +412,8 @@ class Wannier:
         """Finds the proper unitary matrix U_mnk to compute the MLWFs at each point in parameter space.
 
         Args:
-            n_wannier (int): The number of Bloch eigenvectors and thus WFs to compute.
+            n_wannier (int, tuple[int, int]): If an int, the bands from n = 0 to n = n_wannier are used to generate n_wannier functions. 
+            If a tuple, the bands from n = n_wannier[0] to n_wannier[1] are used.
             centers (list[list[float]]): The centers of the WFs, given as [[x0, ..., xN], [y0, ..., yN]].
             parallel (bool, optional): Wheter to parallelize the whole function. Defaults to False.
             n_cores (int, optional): Numbers of cores to use in case of parallelization. Defaults to -1.
@@ -426,8 +424,16 @@ class Wannier:
             xr.DataArray: The unitary matrix U_mnk with additional parameter dimensions.
         """
         print("Computing the Bloch functions...")
-        self.compute_bloch(n_wannier, **blockwargs)
         
+        if isinstance(n_wannier, int):
+            self.n_wannier = [0,n_wannier]
+            self.compute_bloch(**blockwargs)
+        else:
+            self.n_wannier = n_wannier
+            self.compute_bloch(**blockwargs)
+        
+        self.nbands = self.n_wannier[1]-self.n_wannier[0]
+
         paramcoords = {
             dim:self.eigve.coords[dim] for dim in self.eigve.dims
             if dim not in ['m', 'kb1', 'kb2', 'a1', 'a2']
@@ -583,112 +589,4 @@ class Wannier:
         
         return tiled_pot, wannier
         
-        
-
-if __name__ == '__main__':
-    
-    import matplotlib.pyplot as plt  # noqa: E402
-    from bloch_schrodinger.plotting import plot_eigenvector, get_template  # noqa: E402
-
-    
-    kl = 2
-    a = 4*np.pi / 3**1.5 / kl
-    a1 = np.array([3 * a/2, -(3**0.5) * a/2])  # 1st lattice vector
-    a2 = np.array([3 * a/2, 3**0.5 * a/2])  # 2nd lattice vector
-
-    b1 = 3**0.5 * kl * np.array([1, -3**0.5])/2
-    b2 = 3**0.5 * kl * np.array([1, 3**0.5])/2
-
-    m = 1
-    hbar = 1
-    E_r = hbar**2 * kl**2 / 2 / m
-    s1 = 9
-    s2 = 10
-
-    k1 = kl * np.array([-3**0.5 / 2 , 1/2])
-    k2 = kl * np.array([3**0.5 / 2 , 1/2])
-    k3 = kl * np.array([0,-1])
-
-    a1s = np.array([-1, 3**0.5])*2*np.pi/3/a 
-    a2s = np.array([1, 3**0.5])*2*np.pi/3/a
-    K = np.array([0, 4*np.pi/3**1.5/a])
-
-
-    klim = 1
-    na1 = 64
-    na2 = 64
-    
-    centers = [
-        [-a/2, a/2], [0, 0]
-    ]
-
-    V1 = -s2*E_r
-    V2 = -s1*E_r
-
-    honeycomb = Potential(
-        unitvecs = [a1, a2],
-        resolution = (na1, na2),
-        v0 = 0,
-    )
-
-    dirs = [
-        k1[0] * (honeycomb.x - a1[0]) + k1[1] * honeycomb.y,
-        k2[0] * (honeycomb.x - a1[0]) + k2[1] * honeycomb.y,
-        k3[0] * (honeycomb.x - a1[0]) + k3[1] * honeycomb.y,
-    ]
-
-    for i in range(3):
-        honeycomb.add(2*V1*np.cos((dirs[i-1]-dirs[i]) - 2*np.pi/3)/2)
-        honeycomb.add(2*V2*np.cos((dirs[i-1]-dirs[i]) + 2*np.pi/3)/2)
-
-    foo = Wannier(
-        Potential=honeycomb,
-        alpha = 1/2,
-        rec_vecs=[a1s, a2s],
-        resolution=(15,15),
-        method='pw'
-    )
-    
-    
-    U_mnk = foo.solve(2, centers, parallel=False, n_cores=2)    
-
-    pot, wannier = foo.compute_wannier(
-        U_mnk,
-        [-1, 2],
-        [-1, 2],
-        coarsen=(2,2)
-    )
-    
-    #%%
-
-    amplog = get_template('amplitude - log')
-    # amplog['contourkwargs']['levels'] = [10]
-    amplog['autoscale'] = False
-    amplog['clim'] = (1e-12, 1e-1)
-
-    reallog = get_template('real')
-    # reallog['contourkwargs']['levels'] = [1]
-    # reallog['autoscale'] = False
-    # reallog['clim'] = (-1e-1, 1e-1)
-    
-    fig, ax = plot_eigenvector(
-        [[abs(wannier)**2]], [[pot]], [[amplog]]
-    )
-    plt.show()
-    
-    
-    # bar = PWSolver(
-    #     honeycomb, 1/2, 300
-    # )
-    
-    # eigva, eigve = bar.solve(2)
-    
-    # eigve = bar.compute_u(eigve)
-    
-    # fig, ax = plot_eigenvector(
-    #     [[abs(eigve)**2]], [[honeycomb]], [['amplitude']]
-    # )
-    # plt.show()
-    
-
-# %%
+  
