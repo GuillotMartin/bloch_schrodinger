@@ -116,7 +116,7 @@ def cmesh_tmpl(name:str)->dict:
                 "cmap": cm.berlin,
                 "rasterized":True,
                 "norm": lambda: (
-                    colors.SymLogNorm()
+                    colors.SymLogNorm(linthresh=1e-12)
                 ),  # using a factory function to avoid colormap sharing
             },
             "autoscale": True,
@@ -704,6 +704,9 @@ def create_map(
     obj = func(ax,
         X, Y, plot_init, **template['fkwargs']
     )
+    
+    if template.get('clim'):
+        obj.set_clim(template['clim'][0], template['clim'][1])
     
     colorbar = template.get('colorbar')
     if colorbar is not None:

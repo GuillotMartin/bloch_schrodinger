@@ -64,6 +64,7 @@ class Potential:
         self.v0 = v0
         self.resolution = resolution
         self.dtype = dtype
+        self.endpoint = endpoint
 
         if len(unitvecs) != 2:
             raise ValueError("Only two unit cell vectors must be given")
@@ -130,11 +131,14 @@ class Potential:
             xr.DataArray(
                 V,
                 coords={
-                    "a1": np.linspace(-0.5, 0.5, self.resolution[0]),
-                    "a2": np.linspace(-0.5, 0.5, self.resolution[1]),
-                },
-            )
-            * self.v0
+                    "a1": np.linspace(
+                        -0.5, 0.5, self.resolution[0], endpoint=self.endpoint
+                    ) + 1/self.resolution[0]/2 * (1-self.endpoint),
+                    "a2": np.linspace(
+                        -0.5, 0.5, self.resolution[1], endpoint=self.endpoint
+                    ) + 1/self.resolution[1]/2 * (1-self.endpoint),
+                }
+            ) * self.v0
         )
 
         x = self.a1[0] * self.V.a1 + self.a2[0] * self.V.a2
@@ -382,6 +386,20 @@ class Potential:
     def copy(self):
         """Return a copy of the potential"""
         return deepcopy(self)
+    
+    def like(potential:'Potential')->'Potential':
+        """Returns a empty potential with the same specifications as the input potential
+
+        Args:
+            potential (Potential): the input potential whose parameters are to be copied
+
+        Returns:
+            Potential:
+        """
+        new_pot = potential.copy()
+        new_pot.clear()
+        return new_pot
+        
 
     def sel(self, selection: dict) -> "Potential":
         """Return a new potential with a subselection of the potential parameter space. See xarray 'sel' method for more infos.

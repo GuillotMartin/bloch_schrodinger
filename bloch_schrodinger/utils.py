@@ -4,7 +4,9 @@ from typing import Union
 from ipywidgets import FloatSlider, IntSlider
 
 
-
+### ====================
+### Sliders
+### ====================
 def islinspace(arr:xr.DataArray)->tuple[bool, float]:
     """Checks wether a coordinate array is regularily spaced, and return a boolean and the step size.
 
@@ -91,6 +93,9 @@ def create_sliders_from_dims(coordinates:dict[xr.DataArray], start:str = 'left')
             )
     return sliders_ax
 
+### ====================
+### Arrays
+### ====================
 
 
 def coarsen(arr:xr.DataArray, factor: tuple[int, int]) -> xr.DataArray:
@@ -176,3 +181,7 @@ def tile(arr:xr.DataArray, unitvecs:list[list[float, float]] , bounds1: tuple[in
             new_arr[lcR] += arr.transpose(..., 'a1', 'a2').data
     
     return new_arr
+
+
+
+    
