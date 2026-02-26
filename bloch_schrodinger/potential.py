@@ -528,7 +528,7 @@ class Potential:
 
         tot_x = self.a1[0] * new_V.a1 + self.a2[0] * new_V.a2
         tot_y = self.a1[1] * new_V.a1 + self.a2[1] * new_V.a2
-
+        
         # Some assignements
         tot_x = tot_x.assign_coords(
             {
@@ -542,7 +542,6 @@ class Potential:
                 "y": tot_y,
             }
         )
-        
         new_V = new_V.assign_coords(
             {"x": tot_x, "y": tot_y}
         )
@@ -570,6 +569,167 @@ class Potential:
         tiled.y = tot_y
         
         return tiled
+
+type paramType = Union[int, float, xr.DataArray]
+
+def optical_honeycomb(
+    wavelength:float, 
+    s1:Union[paramType, tuple[paramType, paramType, paramType]],
+    s2:Union[paramType, tuple[paramType, paramType, paramType]],
+    resolution: tuple[int, int] = (64, 64),
+    theta:paramType = 0,
+    )-> tuple[dict, Potential]:
+    """Construct a honeycomb lattice over a single unit cell.
+    Args:
+        potential (Potential): The target potential
+        wavelength (float): wavelength of the lattice-generating lasers
+        s1 (Union[paramType, tuple[paramType, paramType, paramType]]): Amplitude of the first triangular lattice. If a tuple of 3 is passed, each laser beam,s intensity is passed separately
+        s2 (Union[paramType, tuple[paramType, paramType, paramType]]): Amplitude of the second triangular lattice. If a tuple of 3 is passed, each laser beam,s intensity is passed separately
+        theta (paramType, optional): Rotates the whole lattice by an angle theta. Defaults to 0.
+
+    Returns:
+        tuple[dict, Potential]: A dictionnary containing most geometrical quntities relative to the lattice, and the constructed potential object
+    """
+    
+    
+    kl = 2 * np.pi / wavelength
+    a = 4*np.pi / 3**1.5 / kl
+    
+    M = np.array([
+        [np.cos(theta), -np.sin(theta)],
+        [np.sin(theta), np.cos(theta)]
+    ])
+    
+    a1 = M@np.array([3 * a/2, -(3**0.5) * a/2])  # 1st lattice vector
+    a2 = M@np.array([3 * a/2, 3**0.5 * a/2])  # 2nd lattice vector
+
+    E_r = kl**2 / 2
+    # s0 = create_parameter('s0', np.linspace(3,10,3))
+
+    k1 = kl * M@np.array([-3**0.5 / 2 , 1/2])
+    k2 = kl * M@np.array([3**0.5 / 2 , 1/2])
+    k3 = kl * M@np.array([0,-1])
+
+    a1s = M@np.array([-1, 3**0.5])*2*np.pi/3/a 
+    a2s = M@np.array([1, 3**0.5])*2*np.pi/3/a
+    K = M@np.array([0, 4*np.pi/3**1.5/a])
+
+    V1 = -s2*E_r
+    V2 = -s1*E_r
+
+    honeycomb = Potential(
+        unitvecs = [a1, a2],
+        resolution = resolution,
+        v0 = 0,
+    )
+
+    ### Lattice
+    off = (a1 +a2)/2
+    dirs = [
+        k1[0] * (honeycomb.x - off[0]) + k1[1] * (honeycomb.y - off[1]),
+        k2[0] * (honeycomb.x - off[0]) + k2[1] * (honeycomb.y - off[1]),
+        k3[0] * (honeycomb.x - off[0]) + k3[1] * (honeycomb.y - off[1]),
+    ]
+
+    tri_1 = 0
+    tri_2 = 0
+    for i in range(3):
+        tri_1 += 2*np.cos((dirs[i-1]-dirs[i]) - 2*np.pi/3)/2
+        tri_2 += 2*np.cos((dirs[i-1]-dirs[i]) + 2*np.pi/3)/2
+
+    honeycomb.set(tri_1 * V1 + tri_2 * V2)
+    
+    constants = dict(
+        a = a,
+        E_r = E_r,
+        a1 = a1,
+        a2 = a2,
+        a1s = a1s,
+        a2s = a2s,
+        K = K,
+        k1 = k1,
+        k2 = k2,
+        k3 = k3
+    )
+    
+    return constants, honeycomb
+
+def make_optical_honeycomb(
+    potential:Potential,
+    wavelength:float, 
+    s1:Union[paramType, tuple[paramType, paramType, paramType]],
+    s2:Union[paramType, tuple[paramType, paramType, paramType]],
+    theta:paramType = 0,
+    )-> tuple[dict, Potential]:
+    """Construct a honeycomb lattice over the potential given
+
+    Args:
+        potential (Potential): The target potential
+        wavelength (float): wavelength of the lattice-generating lasers
+        s1 (Union[paramType, tuple[paramType, paramType, paramType]]): Amplitude of the first triangular lattice. If a tuple of 3 is passed, each laser beam,s intensity is passed separately
+        s2 (Union[paramType, tuple[paramType, paramType, paramType]]): Amplitude of the second triangular lattice. If a tuple of 3 is passed, each laser beam,s intensity is passed separately
+        theta (paramType, optional): Rotates the whole lattice by an angle theta. Defaults to 0.
+
+    Returns:
+        tuple[dict, Potential]: A dictionnary containing most geometrical quntities relative to the lattice, and the constructed potential object
+    """
+    
+    
+    kl = 2 * np.pi / wavelength
+    a = 4*np.pi / 3**1.5 / kl # Lattice constant
+    
+    M = np.array([
+        [np.cos(theta), -np.sin(theta)],
+        [np.sin(theta), np.cos(theta)]
+    ])
+    
+    a1 = M@np.array([3 * a/2, -(3**0.5) * a/2])  # 1st lattice vector
+    a2 = M@np.array([3 * a/2, 3**0.5 * a/2])  # 2nd lattice vector
+
+    E_r = kl**2 / 2 # recoil energy
+    # s0 = create_parameter('s0', np.linspace(3,10,3))
+
+    k1 = kl * M@np.array([-3**0.5 / 2 , 1/2])
+    k2 = kl * M@np.array([3**0.5 / 2 , 1/2])
+    k3 = kl * M@np.array([0,-1])
+
+    a1s = M@np.array([-1, 3**0.5])*2*np.pi/3/a # reciprocal vector
+    a2s = M@np.array([1, 3**0.5])*2*np.pi/3/a # reciprocal vector
+    K = M@np.array([0, 4*np.pi/3**1.5/a]) # BZ corner
+
+    V1 = -s2*E_r 
+    V2 = -s1*E_r
+
+    ### Lattice
+    off = (a1 +a2)/2
+    dirs = [
+        k1[0] * (potential.x - off[0]) + k1[1] * (potential.y - off[1]),
+        k2[0] * (potential.x - off[0]) + k2[1] * (potential.y - off[1]),
+        k3[0] * (potential.x - off[0]) + k3[1] * (potential.y - off[1]),
+    ]
+
+    tri_1 = 0
+    tri_2 = 0
+    for i in range(3):
+        tri_1 += 2*np.cos((dirs[i-1]-dirs[i]) - 2*np.pi/3)/2
+        tri_2 += 2*np.cos((dirs[i-1]-dirs[i]) + 2*np.pi/3)/2
+
+    potential.set(tri_1 * V1 + tri_2 * V2)
+    
+    constants = dict(
+        a = a,
+        E_r = E_r,
+        a1 = a1,
+        a2 = a2,
+        a1s = a1s,
+        a2s = a2s,
+        K = K,
+        k1 = k1,
+        k2 = k2,
+        k3 = k3
+    )
+    
+    return constants, potential
 
 
 def honeycomb(
@@ -608,10 +768,12 @@ def honeycomb(
 
 if __name__ == "__main__":
     dr = create_parameter("dr", [0, 0.1])
-    pot = honeycomb(2.4, 2.75 / 2 - dr, 2.75 / 2 + dr)
-
-    pot_coarse = pot.coarsen((1, 1))
-
-    tiled = pot_coarse.tile([-3,2], [-3,2])
     
-    tiled.plot()
+    
+    consts, pot = optical_honeycomb(
+        1.064, 7, 6.5, 0.52
+    )
+
+    
+    pot.plot()
+

@@ -732,8 +732,8 @@ class FDSolver:
             eigve, dims=list(all_coords.keys()), coords=all_coords, name="eigve_flat"
         )
 
-        x = self.a1[0] * eigve.a1 + self.a2[0] * eigve.a2
-        y = self.a1[1] * eigve.a1 + self.a2[1] * eigve.a2
+        x = self.potentials[0].x
+        y = self.potentials[0].y
         eigve = eigve.assign_coords(
             {
                 "x": x,
@@ -1005,8 +1005,8 @@ class FDSolver:
             eigve = eigve * xr.ufuncs.exp(
                 -1j * xr.ufuncs.angle(eigve.sel(sel0, method="nearest"))
             )
-            xc = self.a1[0] * eigve.a1 + self.a2[0] * eigve.a2
-            yc = self.a1[1] * eigve.a1 + self.a2[1] * eigve.a2
+            xc = self.potentials[0].x
+            yc = self.potentials[0].y
             eigve = eigve.assign_coords(
                 {
                     "x": xc,
