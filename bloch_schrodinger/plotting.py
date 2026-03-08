@@ -29,13 +29,16 @@ matplotlib.rcParams["mathtext.fontset"] = "cm"
 matplotlib.rcParams["font.family"] = "STIXGeneral"
 
 
-def contour_tmpl()->dict:
+def contour_tmpl(lvls:Union[int, np.ndarray] = 3)->dict:
     """Return a simple contour plot template for general purpose use.
 
+    Args:
+        lvls (Union[int, np.ndarray]): If an integer, the number of contour levels, if an array, each entry specifies the height of a level.
     Returns:
         dict
     """
     return {"fkwargs":{
+        "levels": lvls,
         "colors": "gray",
         "linewidths": 0.5,
         "linestyles": "dashed",
@@ -882,6 +885,7 @@ def plot_eigenvector(
     potentials: list[list[Union[Potential, NoneType]]],
     templates: list[list[Union[str,tuple[Union[str, dict]]]]],
     quivers: Union[NoneType, list[list[Union[NoneType, tuple[xr.DataArray]]]]] = None,
+    ncontours:int = 3
 ) -> tuple[Figure, list[Axes]]:
     """The main function to plot eigenvectors in a interactive manner.
 
@@ -895,6 +899,7 @@ def plot_eigenvector(
         quivers (Union[NoneType, list[list[Union[NoneType, tuple[xr.DataArray]]]]], optional): An optional argument to overlay quiver plots on top of the eigenvectors.
         Each entry of the list of lists must either be None or contain a tuple of DataArrays (U,V,C), see the quiver function from matplotlib for more informations.
         Defaults to None.
+        ncontours (int, optional): The number of contours to use for the plot. This is a convenience argument. For more control, see the template formalism. Default to 3
 
     Raises:
         ValueError: Raise errors if the shapes are not consistent.
@@ -928,14 +933,14 @@ def plot_eigenvector(
     def format_template(template:tuple[Union[str, dict]])->tuple[dict, dict, dict]:
         """Format a template input into the proper tuple"""
         if isinstance(template, str):
-            template = (cmesh_tmpl(template), contour_tmpl(), quiver_tmpl())
+            template = (cmesh_tmpl(template), contour_tmpl(ncontours), quiver_tmpl())
         elif isinstance(template, dict):
-            template = (template, contour_tmpl(), quiver_tmpl())
+            template = (template, contour_tmpl(ncontours), quiver_tmpl())
         elif not isinstance(template, tuple):
             raise ValueError("Each template entry must either be a tuple or a string")
         elif len(template) == 1:
             ctmpl =  make_tmpl(template[0])
-            template = (ctmpl, contour_tmpl(), quiver_tmpl())
+            template = (ctmpl, contour_tmpl(ncontours), quiver_tmpl())
         elif len(template) == 2:
             ctmpl =  make_tmpl(template[0])
             template = (ctmpl, template[1], quiver_tmpl())
