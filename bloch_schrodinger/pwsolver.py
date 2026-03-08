@@ -447,7 +447,7 @@ class PWSolver:
             return eigsh(mat, k=n_eigva, v0=X[:, 0], which="SA")
 
         if verbose: 
-            print(f"Performing {n_tot} diagonalizations...")
+            print(f"Performing {n_tot} diagonalizations, expanding on {self.nGs} plane waves...")
             
         if parallel:
             parallel = Parallel(n_jobs=min(n_cores, n_tot), return_as="list", verbose = 5 if verbose else 0)
