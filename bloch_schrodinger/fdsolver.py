@@ -842,24 +842,30 @@ class FDSolver:
 
         return ham
 
-    def normalize(self, eigve: xr.DataArray, norm:float = 1)-> xr.DataArray:
+    def normalize(self, eigve: Union[xr.DataArray, np.ndarray], norm:float = 1)-> xr.DataArray:
         """Normalize the eigenvector array to a specified value in real-space units.
 
         Args:
-            eigve (xr.DataArray): The eigenvector array
+            eigve (xr.DataArray, np.ndarray): The eigenvector array
             norm (float, optional): The norm of the array. Defaults to 1.
 
         Returns:
-            xr.DataArray
+            xr.DataArray, np.ndarray
         """
-        if "field" in eigve.dims:
-            dims = ["a1", "a2", "field"]
-        elif "component" in eigve.dims:
-            dims = ["component"]
-        else:
+        
+        if isinstance(eigve, xr.DataArray):
             
-            dims = ["a1", "a2"]
-        normed = eigve / (abs(eigve)**2).sum(dims)**0.5
+            if "field" in eigve.dims:
+                dims = ["a1", "a2", "field"]
+            elif "component" in eigve.dims:
+                dims = ["component"]
+            else:
+                dims = ["a1", "a2"]
+            
+            normed = eigve / (abs(eigve)**2).sum(dims)**0.5
+        else:
+            normed = eigve / (np.abs(eigve)**2).sum()
+            
         return normed * (norm / self.potentials[0].get_dS())**0.5
         
         
