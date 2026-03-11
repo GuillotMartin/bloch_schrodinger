@@ -852,7 +852,13 @@ class FDSolver:
         Returns:
             xr.DataArray
         """
-        dims = ["a1", "a2", "field"] if "field" in eigve.dims else ["a1", "a2"]
+        if "field" in eigve.dims:
+            dims = ["a1", "a2", "field"]
+        elif "component" in eigve.dims:
+            dims = ["component"]
+        else:
+            
+            dims = ["a1", "a2"]
         normed = eigve / (abs(eigve)**2).sum(dims)**0.5
         return normed * (norm / self.potentials[0].get_dS())**0.5
         
