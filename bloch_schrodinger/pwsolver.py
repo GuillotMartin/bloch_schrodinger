@@ -554,7 +554,7 @@ class PWSolver:
         #     -1j * xr.ufuncs.angle(u.sel(sel0, method="nearest"))
         # ).conj()
         
-        return self.normalize(u)
+        return self.normalize(u).conj()
     
     
 

@@ -231,7 +231,7 @@ class Wannier:
             
             M_mnkb.loc[{'b':b_idx}] = (u_mk.conjugate() * u_nkpb).sum(dim=['a1','a2'])
             
-        return M_mnkb
+        return M_mnkb * self.potential.get_dS()
 
     def r_n(self, M_mnkb: xr.DataArray) -> xr.DataArray:
         M_nnkb = M_mnkb.sel(m=M_mnkb.n)
