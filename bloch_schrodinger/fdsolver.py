@@ -842,6 +842,23 @@ class FDSolver:
 
         return ham
 
+    def normalize(self, eigve: xr.DataArray, norm:float = 1)-> xr.DataArray:
+        """Normalize the eigenvector array to a specified value in real-space units.
+
+        Args:
+            eigve (xr.DataArray): The eigenvector array
+            norm (float, optional): The norm of the array. Defaults to 1.
+
+        Returns:
+            xr.DataArray
+        """
+        dims = ["a1", "a2", "field"] if "field" in eigve.dims else ["a1", "a2"]
+        normed = eigve / (abs(eigve)**2).sum(dims)**0.5
+        return normed * (norm / self.potentials[0].get_dS())**0.5
+        
+        
+        
+
     def solve(
         self, n_eigva: int, keep_vecs: bool = "True", parallel: bool = False, n_cores: int = -1, **kwargs
     ) -> tuple[xr.DataArray, xr.DataArray]:
@@ -1015,7 +1032,7 @@ class FDSolver:
             )
 
         if keep_vecs:
-            return eigva.squeeze(), eigve.squeeze()
+            return eigva.squeeze(), self.normalize(eigve).squeeze()
         else:
             return eigva.squeeze()
 
@@ -1026,36 +1043,25 @@ if __name__ == "__main__":
     
     import matplotlib.pyplot as plt  # noqa: E402
     import time as time # noqa: E402
+    from plotting import plot_eigenvector
     
-    res = (16, 12)
+    res = (200, 200)
 
     a = 2.5
     a1 = np.array([-(3**0.5) / 2 * a, 3 / 2 * a])  # 1st lattice vector
     a2 = np.array([3**0.5 / 2 * a, 3 / 2 * a])
 
     # P = Potential([[3, -20], [3, 20]], resolution=res, v0=0)
-    # P = Potential([[6, 0], [0, 3]], resolution=res, v0=0)
-    P = Potential([a1,a2], resolution=res, v0=0)
+    P = Potential([[10, 0], [0, 10]], resolution=res, v0=0)
+    # P = Potential([a1,a2], resolution=res, v0=0)
     P.V = (P.V.x**2 + P.V.y**2)
 
     solv = FDSolver(P, 1)
     
+    eigva, eigve = solv.solve(1)
     
-    
-    op = solv.lap
-    # op = solv.compute_hopping(1,0)
-    plt.imshow((op).toarray())
-    plt.colorbar()
+    plot_eigenvector([[abs(eigve)**2]], [[P]], [['amplitude']])
     plt.show()
-    
-    # # op = solv.coupling_context['dx_sec_01']
-    Vflat = P.V.data.reshape(-1)
 
-    tpflat = op @ Vflat
-    tp = tpflat.reshape(res)
 
-    fig, ax = plt.subplots()
-    im = ax.pcolormesh(P.x[2:-2, 2:-2], P.y[2:-2, 2:-2], tp[2:-2, 2:-2])
-    plt.colorbar(im)
-    ax.set_aspect("equal")
-    plt.show()
+

@@ -163,6 +163,23 @@ class Potential:
         """
         self.V = self.V + value
 
+    def get_surface(self)->float:
+        """Return the surface of a potential object.
+
+        Returns:
+            float: The surface over which the potentil object is defined
+        """
+        return (self.a1[0]*self.a2[1] - self.a1[1]*self.a2[0]).item()
+    
+    def get_dS(self)->float:
+        """Return the surface element dS of a potential object.
+
+        Returns:
+            float: The surface of a single grid element
+        """
+        return (self.a1[0]*self.a2[1] - self.a1[1]*self.a2[0]).item() / self.resolution[0] /self.resolution[1]
+        
+
     def multiply(self, fac: xr.DataArray):
         """Changes the value of the potential everywhere by multiplying "fac" to it
 
@@ -511,7 +528,7 @@ class Potential:
         na1, na2 = self.V.sizes['a1'], self.V.sizes['a2']
         na1_tot = na1 * reps1
         na2_tot = na2 * reps2
-        
+                
         coords.update(
             {'a1':np.linspace(bounds1[0]-1/2, bounds1[1]-1/2, na1_tot, endpoint=False),
              'a2':np.linspace(bounds2[0]-1/2, bounds2[1]-1/2, na2_tot, endpoint=False)}

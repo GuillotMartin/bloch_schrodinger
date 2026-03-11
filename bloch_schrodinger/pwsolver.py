@@ -498,6 +498,21 @@ class PWSolver:
 
         return eigva.squeeze(), eigve.squeeze()
 
+
+    def normalize(self, eigve: xr.DataArray, norm:float = 1)-> xr.DataArray:
+        """Normalize the eigenvector array to a specified value in real-space units.
+
+        Args:
+            eigve (xr.DataArray): The eigenvector array
+            norm (float, optional): The norm of the array. Defaults to 1.
+
+        Returns:
+            xr.DataArray
+        """
+        dims = ["a1", "a2", "field"] if "field" in eigve.dims else ["a1", "a2"]
+        normed = eigve / (abs(eigve)**2).sum(dims)**0.5
+        return normed * (norm / self.potential.get_dS())**0.5
+
     def compute_u(
         self, 
         eigve: xr.DataArray, 
@@ -539,7 +554,7 @@ class PWSolver:
         #     -1j * xr.ufuncs.angle(u.sel(sel0, method="nearest"))
         # ).conj()
         
-        return u.conj() / (abs(u)**2).sum(['a1', 'a2'])**0.5
+        return self.normalize(u)
     
     
 
@@ -566,8 +581,8 @@ if __name__ == "__main__":
     b2 = a1 * np.pi * 2 / lam**2
 
     klim = kl
-    na1 = 64
-    na2 = 64
+    na1 = 128
+    na2 = 128
 
     V0 = 20
     
