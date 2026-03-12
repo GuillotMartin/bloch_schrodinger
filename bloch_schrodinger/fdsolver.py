@@ -852,7 +852,6 @@ class FDSolver:
         Returns:
             xr.DataArray, np.ndarray
         """
-        
         if isinstance(eigve, xr.DataArray):
             
             if "field" in eigve.dims:
@@ -863,9 +862,10 @@ class FDSolver:
                 dims = ["a1", "a2"]
             
             normed = eigve / (abs(eigve)**2).sum(dims)**0.5
+            
         else:
             normed = eigve / (np.abs(eigve)**2).sum()
-            
+        
         return normed * (norm / self.potentials[0].get_dS())**0.5
         
         

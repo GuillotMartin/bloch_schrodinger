@@ -177,7 +177,7 @@ class Potential:
         Returns:
             float: The surface of a single grid element
         """
-        return (self.a1[0]*self.a2[1] - self.a1[1]*self.a2[0]).item() / self.resolution[0] /self.resolution[1]
+        return abs(self.a1[0]*self.a2[1] - self.a1[1]*self.a2[0]).item() / self.resolution[0] /self.resolution[1]
         
 
     def multiply(self, fac: xr.DataArray):
