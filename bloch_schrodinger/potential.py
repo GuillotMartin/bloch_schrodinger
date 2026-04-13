@@ -333,9 +333,14 @@ class Potential:
 
         self.V = xr.where(r < 1, v1, v2)
 
-    def plot(self, **kwargs) -> tuple[Figure, Axes]:
-        """Creates an interactive plot of the potential, with all the parameters as sliders. Must be used in an interactive python session, preferably a notebook.
-        kwargs are passed to the matplotlib pcolormesh function."""
+    def plot(self, get_cbar = False, **kwargs) -> Union[tuple[Figure, Axes], tuple[Figure, Axes, Axes]]:
+        """Creates an interactive plot of the potential, with all the parameters as sliders. 
+        Must be used in an interactive python session, preferably a notebook.
+        kwargs are passed to the matplotlib pcolormesh function.
+
+        Args:
+            get_cbar (bool, optional): Wheter to return the colorbar for modification. Defaults to False.
+        """
         Vtmp = self.V.squeeze()
         self.V = self.V.assign_coords(
             {
@@ -381,7 +386,10 @@ class Potential:
         out = interactive_output(update, sliders)
         # Display everything
         display(VBox(list(sliders.values()) + [out]))
-        return fig, ax
+        if get_cbar:
+            return fig, ax, cbar
+        else:
+            return fig, ax
 
     def static_plot(self, selection: dict) -> tuple[Figure, Axes]:
         """A very simple static matplotlib function that should work everywhere matplotlib works.
