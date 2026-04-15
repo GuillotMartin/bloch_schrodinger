@@ -4,7 +4,6 @@ from typing import Union
 from bloch_schrodinger.potential import Potential
 from tqdm import tqdm, trange
 from scipy.sparse.linalg import eigsh
-import warnings
 from joblib import Parallel, delayed
 from numpy.linalg import inv
 from scipy.fft import fftn, fftshift
