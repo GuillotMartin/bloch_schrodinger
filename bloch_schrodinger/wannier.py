@@ -586,7 +586,7 @@ class Wannier:
         tiled_pot = self.potential.coarsen(coarsen).tile(bounds1, bounds2)
         
         wannier = wannier.rename({"m":"n"})
-        wannier = wannier / ((abs(wannier) ** 2).sum(["a1", "a2"]) * self.tiled_pot.get_dS()) ** 0.5
+        wannier = wannier / ((abs(wannier) ** 2).sum(["a1", "a2"]) * tiled_pot.get_dS()) ** 0.5
             
         return tiled_pot, wannier
         
