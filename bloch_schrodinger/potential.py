@@ -536,10 +536,12 @@ class Potential:
         na1, na2 = self.V.sizes['a1'], self.V.sizes['a2']
         na1_tot = na1 * reps1
         na2_tot = na2 * reps2
-                
+        
+        l1 = bounds1[1]-1/2 - (bounds1[0]-1/2)
+        l2 = bounds2[1]-1/2 - (bounds2[0]-1/2)
         coords.update(
-            {'a1':np.linspace(bounds1[0]-1/2, bounds1[1]-1/2, na1_tot, endpoint=False),
-             'a2':np.linspace(bounds2[0]-1/2, bounds2[1]-1/2, na2_tot, endpoint=False)}
+            {'a1':np.linspace(bounds1[0]-1/2, bounds1[1]-1/2, na1_tot, endpoint=False)+l1/na1_tot/2,
+             'a2':np.linspace(bounds2[0]-1/2, bounds2[1]-1/2, na2_tot, endpoint=False)+l2/na2_tot/2}
         )
         
         shape = tuple(
