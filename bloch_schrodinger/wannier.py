@@ -338,7 +338,7 @@ class Wannier:
             solv = PWSolver(
                 self.potential, self.alpha, **kwargs
             )
-            
+
             solv.set_reciprocal_space(self.kx, self.ky)
             eigva, eigve = solv.solve(self.n_wannier[1], parallel=True, n_cores = -1)
             eigve = solv.compute_u(eigve)
@@ -546,7 +546,7 @@ class Wannier:
         wannier = wannier.assign_coords(
             {"x": tot_x, "y": tot_y}
         )
-        
+
         print("Computing the mode profiles...")
         for ikb1 in trange(self.eigve.sizes['kb1']):
             for ikb2 in range(self.eigve.sizes['kb2']):
@@ -577,8 +577,9 @@ class Wannier:
                         tmp = 0
                         for i in range(U_mnk.sizes['m']):
                             tmp += (U_mnk[lcK] * coarse_eig[lcK])[{'m':i}]
+                            
+                            
                         tmp = tmp * phase
-                        
                         # tmp = coarse_eig[lcK] * phase
                                                                     
                         wannier[lcR] += tmp.data

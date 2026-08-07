@@ -357,7 +357,7 @@ class PWSolver:
             ky = self.ky
         kinetic_matrix = self.compute_kinetic([kx, ky])
 
-        mat = potential_matrix + kinetic_matrix
+        mat = potential_matrix.transpose() + kinetic_matrix
         return mat
 
     def solve(
@@ -443,7 +443,9 @@ class PWSolver:
 
         def x(p_sel, r_sel):
             mat = self.compute_mat(p_sel, r_sel)
-            return eigsh(mat, k=n_eigva, v0=X[:, 0], which="SA")
+            e, eigv = eigsh(mat, k=n_eigva, v0=X[:, 0], which="SA")
+            eigv *= np.exp(-1j*np.angle(eigv[self.nGs//2]))
+            return e, eigv
 
         if verbose: 
             print(f"Performing {n_tot} diagonalizations, expanding on {self.nGs} plane waves...")
@@ -518,7 +520,7 @@ class PWSolver:
         x: xr.DataArray = None, 
         y: xr.DataArray = None,
         vectorized:bool = False,
-        phase0 = (0.01,0.01)
+        phase0 = (0.0,0.0)
     ) -> xr.DataArray:
         """Compute the spatial shape of the eigenvectors from their plane-wave expression
 
@@ -533,9 +535,9 @@ class PWSolver:
             xr.DataArray
         """
         if x is None:
-            x = self.potential.x - (self.potential.a1[0] + self.potential.a2[0])/2
+            x = self.potential.x - self.potential.x.min().item()
         if y is None:
-            y = self.potential.y - (self.potential.a1[1] + self.potential.a2[1])/2
+            y = self.potential.y
         
         if vectorized:
             u = (
@@ -546,14 +548,14 @@ class PWSolver:
             print('summing...')
             u = 0
             for ig in trange(eigve.sizes['g']):
-                u += eigve[{'g':ig}] * np.exp(1j * (eigve.pwkx[{'g':ig}] * x + eigve.pwky[{'g':ig}] * y))
+                u += eigve[{'g':ig}] * np.exp(-1j * (eigve.pwkx[{'g':ig}] * x + eigve.pwky[{'g':ig}] * y))
         
         # sel0 = dict(a1=phase0[0], a2=phase0[1])
         # u *= xr.ufuncs.exp(
-        #     -1j * xr.ufuncs.angle(u.sel(sel0, method="nearest"))
+        #     1j * xr.ufuncs.angle(u.sel(sel0, method="nearest"))
         # ).conj()
         
-        return self.normalize(u).conj()
+        return self.normalize(u)
     
     
 
