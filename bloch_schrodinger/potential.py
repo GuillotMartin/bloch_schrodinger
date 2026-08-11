@@ -186,9 +186,9 @@ class Potential:
                 self.a1 = self.a[0]
                 self.a2 = self.a[1]
 
-    def __repr__(self) -> str:
-        shape = {dim: len(self.V.coords[dim].data) for dim in self.V.dims}
-        return f"Potential: \n a1 = {self.a1}, a2 = {self.a2} \n dimensions: {shape}"
+    # def __repr__(self) -> str:
+    #     shape = {dim: len(self.V.coords[dim].data) for dim in self.V.dims}
+    #     return f"Potential: \n a1 = {self.a1}, a2 = {self.a2} \n dimensions: {shape}"
 
     def add(self, value: xr.DataArray):
         """Changes the value of the potential everywhere by adding "value" to it
@@ -276,21 +276,59 @@ class Potential:
 
         self.V = xr.where(r < radius, v1, v2)
 
+    def rotate_center(
+        self,
+        center: tuple[Union[float, xr.DataArray]],
+        rotation: Union[float, xr.DataArray] = (0),
+    )-> list[xr.DataArray]:
+        """A small helper function to redefine the origin of coords and rotate them. Useful for drawing functions like rectangle or ellispe.
+        center (tuple[Union[float,xr.DataArray]]): The center of the rectangle in the cartesian basis.
+        dims (tuple[Union[float,xr.DataArray]]): The length along x and y.
+        rotation (tuple[Union[float,xr.DataArray]]): A rotation (in radians) of the prism, as a tuple of angle. 
+        First angle is for rotation around z, second for rotation around y. default to (0,0).
+        """
+        
+        coord = [self.coords[i] - center[i] for i in range(self.n_dims)] 
+        if self.n_dims == 1:
+            return self.coords
+
+        elif self.n_dims == 2:
+            coord_rot = [
+                coord[0] * xr.ufuncs.cos(rotation[0]) + coord[1] * xr.ufuncs.sin(rotation[0]),
+                coord[0] * xr.ufuncs.sin(rotation[0]) - coord[1] * xr.ufuncs.cos(rotation[0]),
+            ]
+            return coord_rot
+
+        else:
+            coord_rot1 = [
+                coord[0] * xr.ufuncs.cos(rotation[0]) + coord[1] * xr.ufuncs.sin(rotation[0]),
+                coord[0] * xr.ufuncs.sin(rotation[0]) - coord[1] * xr.ufuncs.cos(rotation[0]),
+                coord[2]
+            ]
+
+            coord_rot2 = [
+                coord_rot1[0] * xr.ufuncs.cos(rotation[1]) + coord_rot1[2] * xr.ufuncs.sin(rotation[1]),
+                coord_rot1[1],
+                coord_rot1[0] * xr.ufuncs.sin(rotation[1]) - coord_rot1[2] * xr.ufuncs.cos(rotation[1]),
+            ]
+            return coord_rot2
+
     def rectangle(
         self,
         center: tuple[Union[float, xr.DataArray]],
         dims: tuple[Union[float, xr.DataArray]],
-        rotation: Union[float, xr.DataArray] = 0,
+        rotation: tuple[Union[float, xr.DataArray]] = (0),
         method: str = "set",
         inverse: bool = False,
         value: Union[float, xr.DataArray] = 0,
     ):
-        """Change the value of the potential in a rectangle. Support coordinates attribution for all parameters.
+        """Change the value of the potential in a rectangular prism. Support coordinates attribution for all parameters.
 
         Args:
-            center (tuple[Union[float,xr.DataArray]]): The center of the rectangle in the x,y basis.
+            center (tuple[Union[float,xr.DataArray]]): The center of the rectangle in the cartesian basis.
             dims (tuple[Union[float,xr.DataArray]]): The length along x and y.
-            rotation (Union[float,xr.DataArray]): A rotation (in radians) of the rectangle. default to 0.
+            rotation (tuple[Union[float,xr.DataArray]]): A rotation (in radians) of the prism, as a tuple of angle. 
+            First angle is for rotation around z, second for rotation around y. default to (0,0).
             method (str, optional): Wheter to replace the potential inside (method 'set') or to add the value to the potential in the ellipse (method 'add'). Defaults to 'set'.
             inverse (bool, optional): Wheter to replace the potential inside (False) or outside the rectangle.
             value (Union[float,xr.DataArray], optional): The value to set for the potential inside the rectangle. Defaults to 0.
@@ -305,28 +343,53 @@ class Potential:
         else:
             raise ValueError("method must be either 'set' or 'add'")
 
-        x = self.V.x - center[0]
-        y = self.V.y - center[1]
+        coords = self.rotate_center(center, rotation)
 
-        x_rot = +x * xr.ufuncs.cos(rotation) + y * xr.ufuncs.sin(rotation)
-        y_rot = +x * xr.ufuncs.sin(rotation) - y * xr.ufuncs.cos(rotation)
+        if self.n_dims == 1:
+            v1 = self.V * mod + value
+            v2 = self.V
 
-        v1 = self.V * mod + value
-        v2 = self.V
+            if inverse:
+                v1 = self.V
+                v2 = self.V * mod + value
 
-        if inverse:
-            v1 = self.V
-            v2 = self.V * mod + value
+            self.V = xr.where(
+                (abs(coords[0]) < dims[0] / 2), v1, v2
+            )
 
-        self.V = xr.where(
-            (abs(x_rot) < dims[0] / 2) * (abs(y_rot) < dims[1] / 2), v1, v2
-        )
+        elif self.n_dims == 2:
+            v1 = self.V * mod + value
+            v2 = self.V
+
+            if inverse:
+                v1 = self.V
+                v2 = self.V * mod + value
+
+            self.V = xr.where(
+                (abs(coords[0]) < dims[0] / 2) * (abs(coords[1]) < dims[1] / 2), v1, v2
+            )
+
+        else:            
+            v1 = self.V * mod + value
+            v2 = self.V
+
+            if inverse:
+                v1 = self.V
+                v2 = self.V * mod + value
+
+            self.V = xr.where(
+                ((abs(coords[0]) < dims[0] / 2) * 
+                 (abs(coords[1]) < dims[1] / 2) * 
+                 (abs(coords[2]) < dims[2] / 2)
+                 )
+                , v1, v2
+            )
 
     def ellipse(
         self,
         center: tuple[Union[float, xr.DataArray]],
         dims: tuple[Union[float, xr.DataArray]],
-        rotation: Union[float, xr.DataArray] = 0,
+        rotation: tuple[Union[float, xr.DataArray]] = (0),
         method: str = "set",
         inverse: bool = False,
         value: Union[float, xr.DataArray] = 0,
@@ -336,7 +399,8 @@ class Potential:
         Args:
             center (tuple[Union[float,xr.DataArray]]): The center of the ellipse in the x,y basis.
             dims (tuple[Union[float,xr.DataArray]]): The semi-axes along x and y.
-            rotation (Union[float,xr.DataArray]): A rotation (in radians) of the ellipse axis. default to 0.
+            rotation (tuple[Union[float,xr.DataArray]]): A rotation (in radians) of the prism, as a tuple of angle. 
+            First angle is for rotation around z, second for rotation around y. default to (0,0).
             method (str, optional): Wheter to replace the potential inside (method 'set') or to add the value to the potential in the ellipse (method 'add'). Defaults to 'set'.
             inverse (bool, optional): Wheter to replace the potential inside (False) or outside the rectangle.
             value (Union[float,xr.DataArray], optional): The value to set for the potential inside the rectangle. Defaults to 0.
@@ -352,13 +416,12 @@ class Potential:
         else:
             raise ValueError("method must be either 'set' or 'add'")
 
-        x = self.V.x - center[0]
-        y = self.V.y - center[1]
-
-        x_rot = +x * xr.ufuncs.cos(rotation) + y * xr.ufuncs.sin(rotation)
-        y_rot = +x * xr.ufuncs.sin(rotation) - y * xr.ufuncs.cos(rotation)
-
-        r = ((x_rot / dims[0]) ** 2 + (y_rot / dims[1]) ** 2) ** 0.5
+        coords = self.rotate_center(center, rotation)
+        
+        r = 0
+        for i in range(self.n_dims):
+            r = r + (coords[i] / dims[i]) ** 2
+        r = r**0.5
 
         v1 = self.V * mod + value
         v2 = self.V
@@ -370,7 +433,7 @@ class Potential:
         self.V = xr.where(r < 1, v1, v2)
 
     def plot(
-        self, cart_axes=[0, 1], get_cbar=False, **kwargs
+        self, cart_axes:list[int]=[0, 1], get_cbar=False, **kwargs
     ) -> Union[tuple[Figure, Axes], tuple[Figure, Axes, Axes]]:
         """Creates an interactive plot of the potential, with all the parameters as sliders.
         Must be used in an interactive python session, preferably. kwargs are passed to the
@@ -386,20 +449,24 @@ class Potential:
             {self.coord_names[i]: self.coords[i] for i in range(self.n_dims)}
         )
         
-        # Interpolate potential on a cartesian grid
-        inv_coords = create_cart_grid(Vtmp)
+        ortho = cart_axes != [0, 1] or self.n_dims != 2
+        if ortho:
+            # Interpolate potential on a cartesian grid
+            inv_coords = create_cart_grid(Vtmp)
 
-        mapping = {f"a{i + 1}": inv_coords[i] for i in range(self.n_dims)}
-        Vtmp = (
-            Vtmp.interp(mapping, method="linear")
-            .drop_vars([self.coord_names[i] for i in range(self.n_dims)])
-            .rename(
-                {
-                    self.coord_names[i] + "n": self.coord_names[i]
-                    for i in range(self.n_dims)
-                }
+            mapping = {f"a{i + 1}": inv_coords[i] for i in range(self.n_dims)}
+            Vtmp = (
+                Vtmp.interp(mapping, method="linear")
+                .drop_vars([self.coord_names[i] for i in range(self.n_dims)])
+                .rename(
+                    {
+                        self.coord_names[i] + "n": self.coord_names[i]
+                        for i in range(self.n_dims)
+                    }
+                )
             )
-        )
+            
+            
 
         plot_dim = len(cart_axes)
 
@@ -410,7 +477,12 @@ class Potential:
             dim
             for dim in Vtmp.dims
             if dim not in [self.coord_names[j] for j in cart_axes]
+        ] if ortho else [
+            dim
+            for dim in Vtmp.dims
+            if dim not in ["a1", "a2"]
         ]
+        
         sliders = create_sliders(Vtmp, slider_dims, start="mid")
 
         initial_sel = {dim: sliders[dim].value for dim in slider_dims}
@@ -424,12 +496,13 @@ class Potential:
             ax.set_ylabel("Potential")
 
         else:
-            co1 = Vtmp.coords[self.coord_names[cart_axes[0]]]
-            co2 = Vtmp.coords[self.coord_names[cart_axes[1]]]
             tp = potential.transpose(
                 self.coord_names[cart_axes[1]], self.coord_names[cart_axes[0]]
-            )
-
+            ) if ortho else potential
+            
+            co1 = Vtmp.coords[self.coord_names[cart_axes[0]]]
+            co2 = Vtmp.coords[self.coord_names[cart_axes[1]]]
+            
             obj = ax.pcolormesh(co1, co2, tp, shading="auto", **kwargs)
             ax.set_ylabel(self.coord_names[cart_axes[1]])
             ax.set_aspect("equal")
@@ -459,7 +532,7 @@ class Potential:
             else:
                 new_potential = new_potential.transpose(
                     self.coord_names[cart_axes[1]], self.coord_names[cart_axes[0]]
-                )
+                ) if ortho else new_potential
 
                 obj.set_array(new_potential.data.reshape(-1))
                 obj.set_clim(
@@ -476,23 +549,6 @@ class Potential:
             return fig, ax, cbar
         else:
             return fig, ax
-
-    def static_plot(self, selection: dict) -> tuple[Figure, Axes]:
-        """A very simple static matplotlib function that should work everywhere matplotlib works.
-
-        Args:
-            selection (dict): A selection of all paramaters values. Cannot leave parameters out otherwise the potential won't be 2D
-
-        Returns:
-            Figure, Axes: The figure and its ax.
-        """
-        potential = self.V.sel(selection, method="nearest")
-        fig, ax = plt.subplots()
-        mesh = ax.pcolormesh(self.V.x, self.V.y, potential, shading="auto")
-        ax.set_aspect("equal")
-        cbar = fig.colorbar(mesh, ax=ax)
-        cbar.set_label("Potential")
-        return fig, ax
 
     def copy(self):
         """Return a copy of the potential"""
@@ -525,162 +581,136 @@ class Potential:
         new_pot.V = new_pot.V.sel(selection)
         return new_pot
 
-    def smooth(self, smooth_1: float, smooth_2: float, unit: str = "pixel"):
-        """Smooth the potential by applying a gaussian filter to it (see scipy.ndimage.gaussian_filter). The smoothing strength can be given in pixels or units of a1 and a2.
+    def coarsen(self, factor: tuple[int]) -> "Potential":
+        """Return a coarsened copy of the Potential, with reduced resolution along all axes.
 
         Args:
-            smooth_1 (float): the smoothing strength along the direction a1
-            smooth_2 (float): the smoothing strength along the direction a2
-            unit (str, optional): Defines the units to use for the smoothing strength. Can be either 'pixel' or 'space'. Defaults to 'pixel'.
-        """
-        if unit == "space":
-            smooth_1 /= self.da1
-            smooth_2 /= self.da2
-        elif unit != "pixel":
-            raise ValueError("'unit' must either be 'space' or 'pixel'")
-
-        def filter(arr: xr.DataArray) -> xr.DataArray:
-            return gaussian_filter(arr, sigma=(smooth_1, smooth_2))
-
-        smoothed_V = xr.apply_ufunc(
-            filter,
-            self.V,
-            input_core_dims=[
-                ["a1", "a2"]
-            ],  # Telling apply_ufunc not to broadcast on these dimensions
-            output_core_dims=[["a1", "a2"]],
-        )
-        self.V = smoothed_V
-
-    def coarsen(self, factor: tuple[int, int]) -> "Potential":
-        """Return a coarsened copy of the Potential, with reduced resolution along a1 and a2.
-
-        Args:
-            factor (tuple[int, int]): The coarsening factor. The initial resolution must be a multiple of the factor.
+            factor (tuple[int]): The coarsening factor. The initial resolution must be a multiple of the factor.
 
         Returns:
             Potential: Coarsened array
         """
 
         cpot = self.copy()
-
-        cpot.V = cpot.V.coarsen(a1=factor[0], a2=factor[1]).mean()
+        arg = {f"a{i+1}":factor[i] for i in range(self.n_dims)}
+        
+        cpot.V = cpot.V.coarsen(arg).mean()
         cpot.resolution = (
-            self.resolution[0] // factor[0],
-            self.resolution[1] // factor[1],
+            self.resolution[i] // factor[i] for i in range(self.n_dims)
         )
 
-        cpot.x = self.a1[0] * cpot.V.a1 + self.a2[0] * cpot.V.a2
-        cpot.y = self.a1[1] * cpot.V.a1 + self.a2[1] * cpot.V.a2
+        cpot.coords[i] = [0]*self.n_dims
+        tmp_coords = [0] * 3
+        cpot.coords = [0] * 3
+        cpot.da = [0] * 3
 
-        cpot.x = cpot.x.assign_coords(
-            {
-                "x": cpot.x,
-                "y": cpot.y,
-            }
-        )
-        cpot.y = cpot.y.assign_coords(
-            {
-                "x": cpot.x,
-                "y": cpot.y,
-            }
-        )
+        for i in range(cpot.n_dims):
+            for j in range(cpot.n_dims):
+                tmp_coords[i] = (
+                    tmp_coords[i] + cpot.a[j, i] * cpot.V.coords[f"a{j + 1}"]
+                )
+
+        for i in range(cpot.n_dims):
+            cpot.coords[i] = tmp_coords[i].assign_coords(
+                {
+                    cpot.coord_names[i]: tmp_coords[i],
+                }
+            )
+
+            cpot.da[i] = (  # Length increment along ai
+                float(
+                    abs(cpot.V.coords[f"a{i + 1}"][1] - cpot.V.coords[f"a{i + 1}"][0])
+                )
+                * (cpot.a[i] @ cpot.a[i]) ** 0.5
+            )
 
         # They are also stored directly into the DataArray
         cpot.V = cpot.V.assign_coords(
-            {
-                "x": cpot.x,
-                "y": cpot.y,
-            }
+            {cpot.coord_names[i]: cpot.coords[i] for i in range(cpot)}
         )
 
-        cpot.da1 = (
-            float(abs(cpot.V.a1[1] - cpot.V.a1[0])) * (self.a1 @ self.a1) ** 0.5
-        )  # smallest increment of length along a1
-        cpot.da2 = (
-            float(abs(cpot.V.a2[1] - cpot.V.a2[0])) * (self.a2 @ self.a2) ** 0.5
-        )  # smallest increment of length along a2
+        # Definitions for retrocompatibility
+        if cpot.n_dims == 2:
+            cpot.da1 = cpot.da[0]
+            cpot.da2 = cpot.da[1]
+            cpot.a1 = cpot.a[0]
+            cpot.a2 = cpot.a[1]
+            cpot.x = cpot.coords[0]
+            cpot.y = cpotelf.coords[1]
 
         return cpot
 
-    def tile(self, bounds1: tuple[int, int], bounds2: tuple[int, int]) -> "Potential":
+    def tile(self, bounds: tuple[tuple[int, int]]) -> "Potential":
         """Return a copy of the potential extended over multiple unit cells by tiling the original pattern.
 
         Args:
-            bounds1 (tuple[int, int]): Numbers of cells along a1
-            bounds2 (tuple[int, int]): Number of cells along a2
+            bounds (tuple[tuple[int, int]]): A length-n_dims list of pairs of integers. Each pair describe the 
+            number of unit cells to tile along the associated axe.
 
         Returns:
             Potential
         """
 
-        coords = {
-            dim: self.V.coords[dim] for dim in self.V.dims if dim not in ["a1", "a2"]
+        non_spatial_coords = {
+            dim: self.V.coords[dim] for dim in self.V.dims if dim not in [f"a{i+i}" for i in range(self.n_dims)]
         }
 
-        reps1 = bounds1[1] - bounds1[0]
-        reps2 = bounds2[1] - bounds2[0]
-        na1, na2 = self.V.sizes["a1"], self.V.sizes["a2"]
-        na1_tot = na1 * reps1
-        na2_tot = na2 * reps2
+        reps = [bounds[i][1] - bounds[i][0] for i in range(self.n_dims)]
+        
+        ns = [self.V.sizes[f"a{i+1}"] for i in range(self.n_dims)]
+        n_tots = [n * rep for n, rep in zip(reps, ns)]
 
-        l1 = bounds1[1] - 1 / 2 - (bounds1[0] - 1 / 2)
-        l2 = bounds2[1] - 1 / 2 - (bounds2[0] - 1 / 2)
-        coords.update(
+        ls = [
+            bounds[i][1] - 1 / 2 - (bounds[i][0] - 1 / 2) 
+            for i in range(self.n_dims)
+        ]
+
+        non_spatial_coords.update(
             {
-                "a1": np.linspace(
-                    bounds1[0] - 1 / 2, bounds1[1] - 1 / 2, na1_tot, endpoint=False
+                f"a{i+1}": np.linspace(
+                    bounds[i][0] - 1 / 2, bounds[i][1] - 1 / 2, n_tots[i], endpoint=False
                 )
-                + l1 / na1_tot / 2,
-                "a2": np.linspace(
-                    bounds2[0] - 1 / 2, bounds2[1] - 1 / 2, na2_tot, endpoint=False
+                + ls[i] / n_tots[i] / 2
+                for i in range(self.n_dims)
+            }
+        )
+
+        shape = tuple([coord.shape[0] for coord in non_spatial_coords.values()])
+
+        new_V = xr.DataArray(np.zeros(shape, dtype=self.dtype), coords=non_spatial_coords)
+
+        ncoords = [0] * 3
+
+        for i in range(self.n_dims):
+            for j in range(self.n_dims):
+                ncoords[i] = (
+                    ncoords[i] + self.a[j, i] * self.V.coords[f"a{j + 1}"]
                 )
-                + l2 / na2_tot / 2,
-            }
+
+        new_V = new_V.assign_coords(
+            {self.coord_names[i]:ncoords[i] for i in range(self.n_dims)}
+        ).transpose(...,*[f"a{i+1}" for i in range(self.n_dims)])
+        
+        new_V.data = np.tile(
+            self.V.transpose(...,*[f"a{i+1}" for i in range(self.n_dims)]), 
+            reps=[1,*reps]
         )
-
-        shape = tuple([coord.shape[0] for coord in coords.values()])
-
-        new_V = xr.DataArray(np.zeros(shape, dtype=self.dtype), coords=coords)
-
-        tot_x = self.a1[0] * new_V.a1 + self.a2[0] * new_V.a2
-        tot_y = self.a1[1] * new_V.a1 + self.a2[1] * new_V.a2
-
-        # Some assignements
-        tot_x = tot_x.assign_coords(
-            {
-                "x": tot_x,
-                "y": tot_y,
-            }
-        )
-        tot_y = tot_y.assign_coords(
-            {
-                "x": tot_x,
-                "y": tot_y,
-            }
-        )
-        new_V = new_V.assign_coords({"x": tot_x, "y": tot_y})
-
-        # Loop da loop (sorry)
-        for ia1 in range(reps1):
-            for ia2 in range(reps2):
-                lcR = {
-                    "a1": slice(ia1 * na1, (ia1 + 1) * na1),
-                    "a2": slice(ia2 * na2, (ia2 + 1) * na2),
-                }
-
-                new_V[lcR] += self.V.transpose(..., "a1", "a2").data
 
         tiled = Potential(
-            unitvecs=[self.a1 * reps1, self.a2 * reps2],
-            resolution=(na1_tot, na2_tot),
+            unitvecs=[self.a[i] * reps[i] for i in range(self.n_dims)],
+            resolution=tuple(n_tots),
             v0=0,
             dtype=self.dtype,
         )
-
         tiled.V = new_V
-        tiled.x = tot_x
-        tiled.y = tot_y
+        tiled.coords = [ncoords[i] for i in range(self.n_dims)]
+        if self.n_dims == 2:
+            tiled.da1 = ls[0]/n_tots[0]
+            tiled.da2 = ls[1]/n_tots[1]
+            tiled.a1 = tiled.a[0]
+            tiled.a2 = tiled.a[1]
+            tiled.x = tiled.coords[0]
+            tiled.y = tiled.coords[1]
 
         return tiled
 
@@ -876,9 +906,11 @@ if __name__ == "__main__":
 
     bar = create_parameter("bar", np.linspace(0,1,20))
 
-    foo.circle((0, 0, 2), bar+1, value=1)
+    # foo.circle((0, 0, 2), bar+1, value=1)
+    foo.ellipse((0, 0, 0), [4,2,2], rotation = [bar,2],value=1)
+    foot = foo.tile([[-1,2],[0,1],[-2,1]])
     # dimp = create_parameter("dimp", np.linspace(0,1,50))
     # foo.set(foo.coords[0]**4)
     # foo.add((100-20*foo.coords[0]**2)*dimp)
-
-    foo.plot(cart_axes=[1,0])
+    
+    foot.plot(cart_axes=[1,0])
