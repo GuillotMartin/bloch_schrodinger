@@ -83,15 +83,34 @@ def test_plane_wave_and_finite_difference_agree(make_potential):
 
 def test_plane_wave_1d_and_3d_agree_with_finite_difference():
     p1 = Potential(unitvecs=[[L]], resolution=(48,), v0=0)
-    p1.set(5 * np.cos(2 * np.pi * p1.coords[0] / L) + 3 * np.cos(4 * np.pi * p1.coords[0] / L + 0.7))
-    assert abs(float(PWSolver(p1, 0.5, 60).solve(1, verbose=False)[0])
-               - float(FDSolver(p1, 0.5).solve(1, verbose=False)[0])) < 1e-2
+    p1.set(
+        5 * np.cos(2 * np.pi * p1.coords[0] / L)
+        + 3 * np.cos(4 * np.pi * p1.coords[0] / L + 0.7)
+    )
+    assert (
+        abs(
+            float(PWSolver(p1, 0.5, 60).solve(1, verbose=False)[0])
+            - float(FDSolver(p1, 0.5).solve(1, verbose=False)[0])
+        )
+        < 1e-2
+    )
 
-    p3 = Potential(unitvecs=[[L, 0, 0], [0, L, 0], [0, 0, L]], resolution=(16, 16, 16), v0=0)
+    p3 = Potential(
+        unitvecs=[[L, 0, 0], [0, L, 0], [0, 0, L]], resolution=(16, 16, 16), v0=0
+    )
     x, y, z = p3.coords
-    p3.set(4 * np.cos(2 * np.pi * x / L) + 2 * np.cos(2 * np.pi * y / L) + 2 * np.cos(2 * np.pi * z / L))
-    assert abs(float(PWSolver(p3, 0.5, 25).solve(1, verbose=False)[0])
-               - float(FDSolver(p3, 0.5).solve(1, verbose=False)[0])) < 1e-1
+    p3.set(
+        4 * np.cos(2 * np.pi * x / L)
+        + 2 * np.cos(2 * np.pi * y / L)
+        + 2 * np.cos(2 * np.pi * z / L)
+    )
+    assert (
+        abs(
+            float(PWSolver(p3, 0.5, 25).solve(1, verbose=False)[0])
+            - float(FDSolver(p3, 0.5).solve(1, verbose=False)[0])
+        )
+        < 1e-1
+    )
 
 
 def test_compute_u_matches_finite_difference_profile():
@@ -122,7 +141,9 @@ def test_compute_u_fft_matches_explicit_sum():
     coeffs = coeffs.squeeze()
 
     fast = pw.compute_u(coeffs)
-    slow = pw.compute_u(coeffs, coords=pot.coords, vectorized=True).transpose(*fast.dims)
+    slow = pw.compute_u(coeffs, coords=pot.coords, vectorized=True).transpose(
+        *fast.dims
+    )
 
     rel = float(np.abs(fast - slow).max()) / float(np.abs(slow).max())
     assert rel < 1e-12
@@ -197,4 +218,3 @@ def warnings_as_errors():
             yield
 
     return ctx()
-
