@@ -1,3 +1,7 @@
 /.env
 /.vscode
 /bloch_schrodinger.egg-info
+__pycache__/
+/build
+/.ruff_cache
+/.pytest_cache

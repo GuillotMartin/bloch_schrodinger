@@ -1,16 +1,20 @@
+import itertools
+import warnings
+from typing import Union
+
 import numpy as np
 import xarray as xr
-from typing import Union
-from scipy.linalg import expm, fractional_matrix_power
-from numpy.linalg import svd, inv
-from numpy.random import uniform
-from tqdm import tqdm, trange
 from joblib import Parallel, delayed
+from numpy.linalg import inv, svd
+from numpy.random import uniform
+from scipy.linalg import expm, fractional_matrix_power
+from tqdm import tqdm
 from xarray_einstats.linalg import matmul
 
 from bloch_schrodinger.fdsolver import FDSolver
-from bloch_schrodinger.pwsolver import PWSolver
 from bloch_schrodinger.potential import Potential, create_parameter
+from bloch_schrodinger.pwsolver import PWSolver
+
 
 def trH(arr: xr.DataArray) -> xr.DataArray:
     cop = arr.copy()
@@ -46,65 +50,89 @@ class Wannier:
         """Initialize a Wannier object. This class allows the determination of the MLWFs for a whole parameter space.
 
         Args:
-            Potential (Potential): The potential to use for the Bloch function computation 
+            Potential (Potential): The potential to use for the Bloch function computation
             alpha (Union[float, xr.DataArray]): The kinetic term
-            rec_vecs (list[list[float, float]]): The reciprocal vectors of the unit cell, given as [b1, b2] with bi a size-2 list or array.
-            resolution (tuple[int, int]): The resolution for the k-space Monkhorst-Pack grid used. 
+            rec_vecs (list[list[float]]): The reciprocal vectors of the unit cell, one per axis, given as
+            [b1, ...] with bi a list or array of length n_dims.
+            resolution (tuple[int]): The resolution for the k-space Monkhorst-Pack grid used, one per axis.
             method (str, optional): The Bloch-Schrödinger solver to use. Either 'pw' for plane waves or 'fd' for finite differences. Defaults to 'pw'.
+
+        Raises:
+            ValueError: If the potential is 3D, which this class does not support, or if rec_vecs and
+            resolution do not match the potential's dimensionality.
         """
+        self.n_dims = Potential.n_dims
+        if self.n_dims > 2:
+            raise ValueError(
+                f"Wannier supports 1D and 2D potentials, got a {self.n_dims}D one. The rest of the "
+                "package (Potential, FDSolver, PWSolver and the plotting functions) handles 3D, but "
+                "the Marzari-Vanderbilt machinery here does not: the spread functional's finite "
+                "difference stencil is solved on shells of k-points, and neither that nor the Wannier "
+                "profile reconstruction has been worked out for a 3D Brillouin zone."
+            )
+        if len(rec_vecs) != self.n_dims or len(resolution) != self.n_dims:
+            raise ValueError(
+                f"For a {self.n_dims}D potential, Wannier needs {self.n_dims} reciprocal vector(s) and "
+                f"a length-{self.n_dims} resolution, got {len(rec_vecs)} and {len(resolution)}"
+            )
+
         self.potential = Potential
         self.alpha = alpha
         self.method = method
-        
-        self.b1 = rec_vecs[0]
-        self.b2 = rec_vecs[1]
-        self.nb1 = resolution[0]
-        self.nb2 = resolution[1]
-        
-        
-        self.kb1 = create_parameter("kb1", np.linspace(-1/2, 1/2, self.nb1, endpoint=False)+1/2/self.nb1)
-        self.kb2 = create_parameter("kb2", np.linspace(-1/2, 1/2, self.nb2, endpoint=False)+1/2/self.nb2)
-        
-        self.kx = self.b1[0] * self.kb1 + self.b2[0] * self.kb2
-        self.ky = self.b1[1] * self.kb1 + self.b2[1] * self.kb2
-        
-        self.maxsearch = min(min(self.nb1, self.nb2)//2-2, 10)
+
+        self.spatial_dims = [f"a{i + 1}" for i in range(self.n_dims)]
+        self.kb_dims = [f"kb{i + 1}" for i in range(self.n_dims)]
+        self.coord_names = ["x", "y", "z"][: self.n_dims]
+
+        self.b = [np.asarray(v, dtype=float) for v in rec_vecs]
+        self.nb = list(resolution)
+        self.n_k = int(np.prod(self.nb))  # Total number of k-points in the Monkhorst-Pack grid
+
+        self.kb = [
+            create_parameter(
+                name, np.linspace(-1 / 2, 1 / 2, n, endpoint=False) + 1 / 2 / n
+            )
+            for name, n in zip(self.kb_dims, self.nb)
+        ]
+
+        # Cartesian components of every k-point, k_c = sum_i b[i][c] * kb[i]
+        self.k = [
+            sum(self.b[i][c] * self.kb[i] for i in range(self.n_dims))
+            for c in range(self.n_dims)
+        ]
+
+        self.maxsearch = min(min(self.nb) // 2 - 2, 10)
         self.compute_stencil()
-        
-        
+
+
     def compute_stencil(self):
         """Creates the weights for the gradient and laplacian operator definitions, see https://arxiv.org/pdf/0708.0650 sec. 3.2 for more details."""
 
-        i0, j0 = self.nb1 // 2, self.nb2 // 2
-        kx0, ky0 = self.kx[i0, j0].item(), self.ky[i0, j0].item()
+        centre = [n // 2 for n in self.nb]
+        k_grid = [kc.transpose(*self.kb_dims) for kc in self.k]
+        k0 = [float(kc[tuple(centre)]) for kc in k_grid]
 
         lim = self.maxsearch
         # Computing the distances in index and cartesian coordinates for a few shells
-        I, J, kxs, kys, Dist = [], [], [], [], []  # noqa: E741
-        for i in range(-lim, lim + 1):
-            for j in range(-lim, lim + 1):
-                if not (i == 0 and j == 0):
-                    kx1, ky1 = self.kx[i0 + i, j0 + j].item(), self.ky[i0 + i, j0 + j].item()
-                    dist = ((kx1 - kx0) ** 2 + (ky1 - ky0) ** 2) ** 0.5
-                    Dist += [dist]
-                    I += [i]  # noqa: E741
-                    J += [j]
-                    kxs += [kx1 - kx0]
-                    kys += [ky1 - ky0]
-                    
-        I = np.array(I)  # noqa: E741
-        J = np.array(J)
+        offsets, deltas, Dist = [], [], []
+        for off in itertools.product(range(-lim, lim + 1), repeat=self.n_dims):
+            if all(o == 0 for o in off):
+                continue
+            idx = tuple(centre[d] + off[d] for d in range(self.n_dims))
+            delta = [float(k_grid[c][idx]) - k0[c] for c in range(self.n_dims)]
+            offsets += [off]
+            deltas += [delta]
+            Dist += [sum(d**2 for d in delta) ** 0.5]
+
+        offsets = np.array(offsets)
+        deltas = np.array(deltas)
         Dist = np.array(Dist)
-        kxs = np.array(kxs)
-        kys = np.array(kys)
 
         # Sorting all the points by ascending distance to the central one
         sorting = np.argsort(Dist)
-        I_sorted = I[sorting]
-        J_sorted = J[sorting]
+        offsets_sorted = offsets[sorting]
+        deltas_sorted = deltas[sorting]
         Dist_sorted = Dist[sorting]
-        kxs_sorted = kxs[sorting]
-        kys_sorted = kys[sorting]
 
         # Sorting the points by shell number
         shell_distance, start_shell, shell_index, n_in_shell = np.unique(
@@ -114,43 +142,28 @@ class Wannier:
             return_counts=True,
         )
 
-        # Solve for the weights, keep adding shells until a
+        # The condition sum_b w_b b_alpha b_beta = delta_alpha_beta, one row per independent pair of
+        # cartesian directions: (xx) in 1D, (xx, xy, yy) in 2D
+        pairs = [
+            (c1, c2) for c1 in range(self.n_dims) for c2 in range(c1, self.n_dims)
+        ]
+        q = np.array([1.0 if c1 == c2 else 0.0 for c1, c2 in pairs])
+
+        # Solve for the weights, keep adding shells until the condition is met
         solved = False
         nshell = 1
         while not solved:
-            q = np.array([1, 0, 1]) # solving for symmetric weights
             A_js = np.array(
                 [
                     [
                         sum(
-                            [
-                                kxs_sorted[start_shell[s] + m]
-                                * kxs_sorted[start_shell[s] + m]
-                                for m in range(n_in_shell[s])
-                            ]
+                            deltas_sorted[start_shell[s] + m][c1]
+                            * deltas_sorted[start_shell[s] + m][c2]
+                            for m in range(n_in_shell[s])
                         )
                         for s in range(nshell)
-                    ],
-                    [
-                        sum(
-                            [
-                                kxs_sorted[start_shell[s] + m]
-                                * kys_sorted[start_shell[s] + m]
-                                for m in range(n_in_shell[s])
-                            ]
-                        )
-                        for s in range(nshell)
-                    ],
-                    [
-                        sum(
-                            [
-                                kys_sorted[start_shell[s] + m]
-                                * kys_sorted[start_shell[s] + m]
-                                for m in range(n_in_shell[s])
-                            ]
-                        )
-                        for s in range(nshell)
-                    ],
+                    ]
+                    for c1, c2 in pairs
                 ],
             )
 
@@ -166,6 +179,11 @@ class Wannier:
                 self.n_shell = nshell
             else:
                 nshell += 1
+                if nshell > len(n_in_shell):
+                    raise ValueError(
+                        "Could not satisfy the stencil condition on this k-mesh. Increase the "
+                        "Monkhorst-Pack resolution."
+                    )
 
         weights = []
         neighbors = []
@@ -173,17 +191,23 @@ class Wannier:
         for s in range(nshell):
             for m in range(n_in_shell[s]):
                 indx = start_shell[s] + m
-                neighbors_indexes += [(I_sorted[indx], J_sorted[indx])]
-                neighbors += [[kxs_sorted[indx], kys_sorted[indx]]]
+                neighbors_indexes += [list(offsets_sorted[indx])]
+                neighbors += [list(deltas_sorted[indx])]
                 weights += [w[s]]
 
         self.stencil_size = len(weights)
         self.weights = xr.DataArray(weights, coords={"b": np.arange(self.stencil_size)})
+        # 'kxy' indexes the cartesian components of each stencil vector b
         self.neighbors = xr.DataArray(
-            neighbors, coords={"b": np.arange(self.stencil_size), "kxy": [0, 1]}
+            neighbors,
+            coords={
+                "b": np.arange(self.stencil_size),
+                "kxy": np.arange(self.n_dims),
+            },
         )
         self.neighbors_indexes = xr.DataArray(
-            neighbors_indexes, coords={"b": np.arange(self.stencil_size), "ij": [0, 1]}
+            neighbors_indexes,
+            coords={"b": np.arange(self.stencil_size), "ij": np.arange(self.n_dims)},
         )
         
         
@@ -203,49 +227,62 @@ class Wannier:
         nb = self.stencil_size # shorter names
 
         M_mnkb = xr.DataArray(
-            np.zeros((self.nbands, self.nbands, self.nb1, self.nb1, nb), dtype=np.complex128),
-            dims=['m','n','kb1','kb2','b']
+            np.zeros((self.nbands, self.nbands, *self.nb, nb), dtype=np.complex128),
+            dims=['m','n',*self.kb_dims,'b']
         )
 
-        M_mnkb.coords["kb1"] = self.kb1
-        M_mnkb.coords["kb2"] = self.kb2
-
+        for dim, coord in zip(self.kb_dims, self.kb):
+            M_mnkb.coords[dim] = coord
 
         for b_idx in range(nb):
-            delta_i = self.neighbors_indexes.sel(b=b_idx, ij=0).item()
-            delta_j = self.neighbors_indexes.sel(b=b_idx, ij=1).item()
-            
-            u_nkpb = u_mk.roll({'kb1':-delta_i, 'kb2':-delta_j}).rename({'m':'n'})
-            
-            i = np.arange(self.nb1)[:, None]
-            j = np.arange(self.nb2)[None, :]
+            delta = [
+                int(self.neighbors_indexes.sel(b=b_idx, ij=i)) for i in range(self.n_dims)
+            ]
 
-            wi = np.where(i + delta_i < 0, -1, np.where(i + delta_i >= self.nb1, 1, 0))
-            wj = np.where(j + delta_j < 0, -1, np.where(j + delta_j >= self.nb2, 1, 0))
-            
-            Gx = wi * self.b1[0] + wj * self.b2[0]
-            Gy = wi * self.b1[1] + wj * self.b2[1]
-            
-            phase = np.exp(1j * (Gx[:,:,None,None] * u_mk.x.data[None,None,:,:] + Gy[:,:,None,None] * u_mk.y.data[None,None,:,:]))
-            u_nkpb *= phase[None,:,:,:,:]
-            
-            M_mnkb.loc[{'b':b_idx}] = (u_mk.conjugate() * u_nkpb).sum(dim=['a1','a2'])
-            
+            u_nkpb = u_mk.roll(
+                {dim: -d for dim, d in zip(self.kb_dims, delta)}
+            ).rename({'m':'n'})
+
+            # Rolling wraps k-points around the zone: those get shifted by a reciprocal lattice
+            # vector G, which the periodic part of the Bloch function has to be corrected for.
+            wraps = []
+            for i, (dim, n) in enumerate(zip(self.kb_dims, self.nb)):
+                idx = np.arange(n)
+                wraps += [
+                    xr.DataArray(
+                        np.where(idx + delta[i] < 0, -1, np.where(idx + delta[i] >= n, 1, 0)),
+                        coords={dim: u_mk.coords[dim].values},
+                        dims=dim,
+                    )
+                ]
+
+            phase_arg = 0
+            for c in range(self.n_dims):
+                G_c = sum(wraps[i] * self.b[i][c] for i in range(self.n_dims))
+                phase_arg = phase_arg + G_c * u_mk.coords[self.coord_names[c]]
+            u_nkpb = u_nkpb * np.exp(1j * phase_arg)
+
+            M_mnkb.loc[{'b':b_idx}] = (
+                (u_mk.conjugate() * u_nkpb)
+                .sum(dim=self.spatial_dims)
+                .transpose('m', 'n', *self.kb_dims)
+            )
+
         return M_mnkb * self.potential.get_dS()
 
     def r_n(self, M_mnkb: xr.DataArray) -> xr.DataArray:
         M_nnkb = M_mnkb.sel(m=M_mnkb.n)
-        r = -(self.weights * self.neighbors * xr.ufuncs.angle(M_nnkb)).sum('b').sum(["kb1", "kb2"]) / self.nb1 / self.nb2
+        r = -(self.weights * self.neighbors * xr.ufuncs.angle(M_nnkb)).sum('b').sum(self.kb_dims) / self.n_k
         return r
-     
-    def Omega(self, M_mnkb: xr.DataArray) -> xr.DataArray:        
+
+    def Omega(self, M_mnkb: xr.DataArray) -> xr.DataArray:
         M_nnkb = M_mnkb.sel(m=M_mnkb.n)
         b_dot_rn = (self.neighbors * self.r_n(M_mnkb)).sum("kxy")
         diag = ((xr.ufuncs.angle(M_nnkb) + b_dot_rn) ** 2).sum("n")
 
         nondiag = (abs(M_mnkb) ** 2).where(M_mnkb.m != M_mnkb.n).sum(["m", "n"])
 
-        omega = ((diag + nondiag)*self.weights).sum('b').sum(["kb1", "kb2"]) / self.nb1 / self.nb2
+        omega = ((diag + nondiag)*self.weights).sum('b').sum(self.kb_dims) / self.n_k
 
         return omega.item()
     
@@ -274,8 +311,10 @@ class Wannier:
         nM = M.copy()
         for ib in range(self.stencil_size):
             U_kpb = U.roll(
-                {"kb1": -self.neighbors_indexes[ib, 0].item(), 
-                 "kb2": -self.neighbors_indexes[ib, 1].item()}
+                {
+                    dim: -int(self.neighbors_indexes[ib, i])
+                    for i, dim in enumerate(self.kb_dims)
+                }
             )
             nM[{"b": ib}] = matmul(
                 trH(U), matmul(M[{"b": ib}], U_kpb, ["m", "n"]), ["m", "n"]
@@ -283,34 +322,48 @@ class Wannier:
 
         return nM
 
-    def guess(self, u_mk:xr.DataArray, centers:list[list[float, float]])->xr.DataArray:
+    def guess(
+        self,
+        u_mk: xr.DataArray,
+        centers: list[list[float]],
+        rng: np.random.Generator | None = None,
+    ) -> xr.DataArray:
         """Initialize a matrix U_mnk0 by using gaussian functions.
 
         Args:
             u_mk (xr.DataArray): The initial eigenvector set
-            centers (list[list[float, float]]): The centers of each wannier functions
+            centers (list[list[float]]): The center of each wannier function, one [x, ...] per function
+            rng (np.random.Generator, optional): Source of the random spread given to each trial gaussian.
+            Pass a seeded generator to make the whole minimization reproducible; without one the starting
+            point, and therefore the minimum reached, differs from run to run. Defaults to None.
 
         Returns:
             xr.DataArray
         """
         # Taking random points for the centers
-        
-        sigma = self.potential.a1@self.potential.a1 / 10 # A reasonable spread
-        
+        draw = (rng.uniform if rng is not None else uniform)
+
+        sigma = self.potential.a[0]@self.potential.a[0] / 10 # A reasonable spread
+
         g_n = xr.DataArray(
-            np.zeros((self.nbands, u_mk.sizes['a1'], u_mk.sizes['a2'])),
-            coords = {'n':np.arange(self.n_wannier[0], self.n_wannier[1]), 'a1':u_mk.a1, 'a2':u_mk.a2}
+            np.zeros((self.nbands, *[u_mk.sizes[d] for d in self.spatial_dims])),
+            coords = {
+                'n': np.arange(self.n_wannier[0], self.n_wannier[1]),
+                **{d: u_mk.coords[d] for d in self.spatial_dims},
+            }
         )
-        
+
         for i in range(self.nbands):
-            gauss = np.exp(
-                - ((u_mk.x - centers[i][0])**2 + (u_mk.y - centers[i][1])**2) / 2 / (sigma*uniform(0.5, 2))**2
+            r2 = sum(
+                (u_mk.coords[name] - centers[i][c]) ** 2
+                for c, name in enumerate(self.coord_names)
             )
-            gauss /= (gauss**2).sum(["a1", "a2"])
-            g_n[{'n':i}] = gauss
-        
+            gauss = np.exp(-r2 / 2 / (sigma*draw(0.5, 2))**2)
+            gauss /= (gauss**2).sum(self.spatial_dims)
+            g_n[{'n':i}] = gauss.transpose(*self.spatial_dims)
+
         # Now performing a lödwin decomposition
-        A_mnk = (u_mk.conjugate() * g_n).sum(["a1", "a2"])
+        A_mnk = (u_mk.conjugate() * g_n).sum(self.spatial_dims)
         S_mnk = matmul(trH(A_mnk), A_mnk, ["m", "n"])
 
         invsqrt_S_mnk = xr.apply_ufunc(
@@ -320,7 +373,7 @@ class Wannier:
             output_core_dims=[["m", "n"]],
         )
 
-        U_mnk0 = matmul(A_mnk, invsqrt_S_mnk, ["m", "n"]).transpose('m', 'n', 'kb1', 'kb2')
+        U_mnk0 = matmul(A_mnk, invsqrt_S_mnk, ["m", "n"]).transpose('m', 'n', *self.kb_dims)
         
         return U_mnk0
                     
@@ -339,13 +392,13 @@ class Wannier:
                 self.potential, self.alpha, **kwargs
             )
 
-            solv.set_reciprocal_space(self.kx, self.ky)
+            solv.set_reciprocal_space(self.k)
             eigva, eigve = solv.solve(self.n_wannier[1], parallel=True, n_cores = -1)
             eigve = solv.compute_u(eigve)
         
         elif self.method == 'fd':
             solv = FDSolver(self.potential, self.alpha)
-            solv.set_reciprocal_space(self.kx, self.ky)
+            solv.set_reciprocal_space(self.k)
             eigva, eigve = solv.solve(self.n_wannier[1], parallel=True, n_cores = -1)
 
         else:
@@ -354,71 +407,174 @@ class Wannier:
         if self.n_wannier[1] == 1:
             eigve = eigve.expand_dims('band')
         
-        self.eigve = eigve.transpose(... , 'band', 'kb1', 'kb2','a1','a2').rename({'band':'m'})[{'m':slice(self.n_wannier[0], None)}]
+        self.eigve = eigve.transpose(..., 'band', *self.kb_dims, *self.spatial_dims).rename({'band':'m'})[{'m':slice(self.n_wannier[0], None)}]
 
-    def compute_U_mnk(self, sel:dict, centers:list[list[float]], tol:float)->xr.DataArray:
+    @staticmethod
+    def _inner(A: xr.DataArray, B: xr.DataArray) -> float:
+        """The real inner product Re<A,B> on the gradient space, summed over k and matrix entries.
+
+        Dropped to numpy on purpose: three of these run per conjugate gradient iteration, and xarray's
+        alignment machinery costs more than the arithmetic on arrays this small, enough to cancel out
+        the iterations the better search direction saves.
+        """
+        if A.dims != B.dims:
+            B = B.transpose(*A.dims)
+        return float(np.real(np.vdot(A.values, B.values)))
+
+    def initial_step(self) -> float:
+        """The step length 1/(4.sum_b w_b) that Marzari and Vanderbilt derive for steepest descent.
+
+        It is the exact minimizer along the gradient for the diagonal part of the functional, so it is
+        a far better starting guess than an arbitrary constant, and the line search then only has to
+        correct for the rest.
+
+        Returns:
+            float
+        """
+        return 1 / (4 * float(self.weights.sum()))
+
+    def compute_U_mnk(
+        self,
+        sel: dict,
+        centers: list[list[float]],
+        tol: float,
+        max_iter: int = 200,
+        method: str = "cg",
+        rng: np.random.Generator | None = None,
+        return_info: bool = False,
+    ) -> xr.DataArray:
         """Determine the MLWFs for a given collection of eigenvectors u_mk at a given parameter space point 'sel',
-        using a basic gradient descent algorithm.
+        by minimizing the spread functional.
+
+        The search direction is either plain steepest descent or, by default, a Polak-Ribiere conjugate
+        gradient built on top of it. The step length starts from the analytic value of 'initial_step'
+        and is then grown on success and halved on rejection.
 
         Args:
             sel (xr.DataArray): The point in parameter space for which to find the MLWFs.
-            U_mnk0 (xr.DataArray): The initial guess for the Unitary matrix.
+            centers (list[list[float]]): The center of each wannier function, one [x, ...] per function.
+            tol (float): Convergence threshold on the *relative* decrease of the spread. Being relative,
+            it means the same thing whatever the magnitude of the spread happens to be for a given lattice.
+            max_iter (int, optional): Hard cap on the number of iterations. Defaults to 200.
+            method (str, optional): 'cg' for conjugate gradient, 'sd' for plain steepest descent. Defaults to 'cg'.
+            rng (np.random.Generator, optional): Passed to 'guess', see there. Defaults to None.
+            return_info (bool, optional): Also return a dict describing how the minimization went.
+            Defaults to False.
 
         Returns:
-            xr.DataArray: The unitary matrix transformation U_mnk required to determine the MLWFs
-        """
-        u_mk = self.eigve.sel(sel)
-        U_mnk0 = self.guess(u_mk, centers)
-        
-        M_init = self.M_mnkb(u_mk)
-        U_init = U_mnk0
-        
-        M0 = self.new_M(U_init, M_init)
-        U0 = U_init
-        
-        Omega0 = self.Omega(M0)  # Initial value of the functional
-        n_up = 0
-        alpha = 0.1
+            xr.DataArray: The unitary matrix transformation U_mnk required to determine the MLWFs, and
+            optionally a dict with the iteration count, the final spread and whether it converged.
 
-        while n_up < 10:
+        Raises:
+            ValueError: If method is neither 'cg' nor 'sd'.
+        """
+        if method not in ("cg", "sd"):
+            raise ValueError(f"method must be 'cg' or 'sd', got {method!r}")
+
+        u_mk = self.eigve.sel(sel)
+        U0 = self.guess(u_mk, centers, rng=rng)
+
+        M_init = self.M_mnkb(u_mk)
+        M0 = self.new_M(U0, M_init)
+        Omega0 = self.Omega(M0)  # Initial value of the functional
+
+        alpha = self.initial_step()
+        direction = None
+        previous_gradient = None
+        n_up = 0
+        converged = False
+        iteration = 0
+
+        while iteration < max_iter:
+            iteration += 1
             G0 = self.G_nmk(M0)
-            U_trial = matmul(U0, xexpm(alpha * G0), ["m", "n"])
+
+            if method == "cg" and previous_gradient is not None:
+                # Polak-Ribiere. Clamping beta at zero restarts the recursion along the plain
+                # gradient whenever conjugacy stops paying, which is the usual safeguard.
+                denominator = self._inner(previous_gradient, previous_gradient)
+                beta = (
+                    max(
+                        (self._inner(G0, G0) - self._inner(G0, previous_gradient))
+                        / denominator,
+                        0.0,
+                    )
+                    if denominator > 0
+                    else 0.0
+                )
+                direction = G0 + beta * direction
+            else:
+                direction = G0
+            previous_gradient = G0
+
+            U_trial = matmul(U0, xexpm(alpha * direction), ["m", "n"])
             M_trial = self.new_M(U_trial, M_init)
             Omega_trial = self.Omega(M_trial)
 
             epsilon = Omega0 - Omega_trial
-            if epsilon > tol:
+            if epsilon > 0:
                 n_up = 0
                 M0 = M_trial.copy()
                 U0 = U_trial.copy()
-                Omega0 = Omega_trial
                 alpha *= 1.2
+                # Stop once the spread has stopped moving relative to its own size, rather than after
+                # a fixed run of rejected steps: that tail costs ten full evaluations for nothing.
+                converged = epsilon <= tol * max(abs(Omega0), 1e-30)
+                Omega0 = Omega_trial
+                if converged:
+                    break
             else:
                 n_up += 1
                 alpha *= 0.5
-            
-            # print(Omega_trial)
+                # A rejected step means the direction was not usable, so the conjugacy is stale
+                previous_gradient = None
+                if n_up >= 10:
+                    converged = True
+                    break
 
+        if not converged:
+            warnings.warn(
+                f"The spread minimization at {sel or 'the single parameter point'} used all "
+                f"{max_iter} iterations without meeting tol={tol:g}; the last spread was "
+                f"{Omega0:.6g}. Raise max_iter, or loosen tol.",
+                stacklevel=2,
+            )
+
+        if return_info:
+            return U0, {
+                "iterations": iteration,
+                "spread": Omega0,
+                "converged": converged,
+            }
         return U0
-    
+
+
     def solve(
         self, 
         n_wannier: Union[int, tuple[int, int]],
         centers:list[list[float]],
         parallel: bool = False,
         n_cores: int = -1,
-        blockwargs: dict = {}, 
-        tol = 1e-7)->xr.DataArray:
+        blockwargs: dict = {},
+        tol = 1e-7,
+        max_iter: int = 200,
+        method: str = "cg",
+        seed: int | None = None)->xr.DataArray:
         """Finds the proper unitary matrix U_mnk to compute the MLWFs at each point in parameter space.
 
         Args:
             n_wannier (int, tuple[int, int]): If an int, the bands from n = 0 to n = n_wannier are used to generate n_wannier functions. 
             If a tuple, the bands from n = n_wannier[0] to n_wannier[1] are used.
-            centers (list[list[float]]): The centers of the WFs, given as [[x0, ..., xN], [y0, ..., yN]].
+            centers (list[list[float]]): The center of each WF, one [x, ...] per function, e.g. [[x0, y0], [x1, y1]].
             parallel (bool, optional): Wheter to parallelize the whole function. Defaults to False.
             n_cores (int, optional): Numbers of cores to use in case of parallelization. Defaults to -1.
             blockwargs (dict, optional): Arguments to pass on to the Bloch-Schrödinger solver constructor function. Defaults to {}.
-            tol (_type_, optional): The tolreance for the gradient descent finding U_mnk. Defaults to 1e-7.
+            tol (_type_, optional): Convergence threshold on the relative decrease of the spread. Defaults to 1e-7.
+            max_iter (int, optional): Hard cap on the minimization iterations per parameter point. Defaults to 200.
+            method (str, optional): 'cg' for conjugate gradient, 'sd' for plain steepest descent. Defaults to 'cg'.
+            seed (int, optional): Seed for the random spreads of the initial gaussians. The minimization
+            starts from a randomized guess, so without a seed two identical calls land on slightly
+            different matrices; pass one to make a computation reproducible. Defaults to None.
 
         Returns:
             xr.DataArray: The unitary matrix U_mnk with additional parameter dimensions.
@@ -436,15 +592,14 @@ class Wannier:
 
         paramcoords = {
             dim:self.eigve.coords[dim] for dim in self.eigve.dims
-            if dim not in ['m', 'kb1', 'kb2', 'a1', 'a2']
+            if dim not in ['m', *self.kb_dims, *self.spatial_dims]
         }
         
         allcoords = {
             **paramcoords,
             "m":self.eigve.m,
             "n":self.eigve.m.rename('n').rename({'m':'n'}),
-            "kb1":self.eigve.kb1,
-            "kb2":self.eigve.kb2,
+            **{d: self.eigve.coords[d] for d in self.kb_dims},
         }
         
         shape = tuple(
@@ -472,123 +627,159 @@ class Wannier:
         
         n_tot = len(selections)
                 
-        def f(x):
-            return self.compute_U_mnk(x, centers, tol)
+        # One generator per parameter point, all derived from the one seed, so that a run is
+        # reproducible whether or not it ends up being parallelised
+        seeds = np.random.SeedSequence(seed).spawn(n_tot)
+        rngs = [np.random.default_rng(s) for s in seeds] if seed is not None else [None] * n_tot
+
+        def f(x, rng):
+            return self.compute_U_mnk(
+                x, centers, tol, max_iter=max_iter, method=method, rng=rng, return_info=True
+            )
         
         print(f"Computing {n_tot} sets of Wannier functions")
         if parallel:
             parallel = Parallel(n_jobs=min(n_cores, n_tot), return_as="list", verbose = 5)
-            results = parallel(delayed(f)(x) for x in selections)
+            results = parallel(delayed(f)(x, r) for x, r in zip(selections, rngs))
         else:
             results = []
             with tqdm(total=n_tot) as pbar:
-                for x in selections:
-                    results += [f(x)]
+                for x, r in zip(selections, rngs):
+                    results += [f(x, r)]
                     pbar.update(1)
 
+        infos = [info for _, info in results]
         for i in range(n_tot):
-            U_tot_mnk.loc[selections[i]] = results[i]
-        
+            U_tot_mnk.loc[selections[i]] = results[i][0]
+
+        n_failed = sum(not info["converged"] for info in infos)
+        iterations = [info["iterations"] for info in infos]
+        print(
+            f"Minimization: {sum(iterations) / n_tot:.0f} iterations on average, "
+            f"spread between {min(i['spread'] for i in infos):.4g} and "
+            f"{max(i['spread'] for i in infos):.4g}"
+            + (f", {n_failed} point(s) hit max_iter" if n_failed else "")
+        )
+
         return U_tot_mnk
 
     def compute_wannier(
-        self, 
+        self,
         U_mnk:xr.DataArray,
-        bounds1: tuple[int, int],
-        bounds2: tuple[int, int],
-        coarsen: tuple[int, int] = (1,1),
+        bounds: list[tuple[int, int]],
+        coarsen: tuple[int] | None = None,
         )->tuple[Potential, xr.DataArray]:
         """Compute the WFs profiles from a given unitary matrix.
 
         Args:
             U_mnk (xr.DataArray): The unitary matrix to use, its dimensions must match those of the corresponding Bloch vectors.
-            bounds1 (tuple[int, int]): The number of unit cells along a1 over which to extend the WFs computation.
-            bounds2 (tuple[int, int]): The number of unit cells along a2 over which to extend the WFs computation.
-            coarsen (tuple[int, int], optional): Wheter to coarsen the resolution of the mode profile. The coarsening factors must be dividers of na1 and na2. 
-            See xarray coarsen function for more infos. Defaults to (1,1).
+            bounds (list[tuple[int, int]]): One pair per axis, giving the range of unit cells along that
+            lattice vector over which to extend the WFs computation.
+            coarsen (tuple[int], optional): Wheter to coarsen the resolution of the mode profile, one factor
+            per axis. The factors must be dividers of the potential's resolution. See xarray coarsen function
+            for more infos. Defaults to no coarsening.
 
         Returns:
             tuple[Potential, xr.DataArray]: The extended potential for plotting/Hamiltonian computation as well as the MLWFs profiles.
+
+        Raises:
+            ValueError: If bounds or coarsen do not match the potential's dimensionality.
         """
-        if coarsen != (1,1):
+        if coarsen is None:
+            coarsen = tuple([1] * self.n_dims)
+        if len(bounds) != self.n_dims or len(coarsen) != self.n_dims:
+            raise ValueError(
+                f"For a {self.n_dims}D potential, bounds and coarsen must both have {self.n_dims} "
+                f"entries, got {len(bounds)} and {len(coarsen)}"
+            )
+
+        if any(c != 1 for c in coarsen):
             coarse_eig = self.eigve.coarsen(
-                a1 = coarsen[0],
-                a2 = coarsen[1],
+                {dim: c for dim, c in zip(self.spatial_dims, coarsen)},
                 coord_func='min'
             ).mean()
         else:
             coarse_eig = self.eigve
-            
-        na1_coarse = self.potential.resolution[0] // coarsen[0]
-        na2_coarse = self.potential.resolution[1] // coarsen[1]
-        na1_tot = na1_coarse * (bounds1[1]-bounds1[0]) 
-        na2_tot = na2_coarse * (bounds2[1]-bounds2[0])
-        
-        coords = {dim:coarse_eig.coords[dim] for dim in coarse_eig.dims if dim not in ['a1', 'a2', 'kb1', 'kb2']}
+
+        n_coarse = [
+            self.potential.resolution[i] // coarsen[i] for i in range(self.n_dims)
+        ]
+        n_cells = [bounds[i][1] - bounds[i][0] for i in range(self.n_dims)]
+        n_tot = [n_coarse[i] * n_cells[i] for i in range(self.n_dims)]
+
+        coords = {
+            dim: coarse_eig.coords[dim]
+            for dim in coarse_eig.dims
+            if dim not in [*self.spatial_dims, *self.kb_dims]
+        }
 
         coords.update(
-            {'a1':np.linspace(bounds1[0]-1/2, bounds1[1]-1/2, na1_tot, endpoint=False) + 1/na1_coarse/2,
-             'a2':np.linspace(bounds2[0]-1/2, bounds2[1]-1/2, na2_tot, endpoint=False) + 1/na2_coarse/2}
+            {
+                dim: np.linspace(
+                    bounds[i][0] - 1 / 2, bounds[i][1] - 1 / 2, n_tot[i], endpoint=False
+                )
+                + 1 / n_coarse[i] / 2
+                for i, dim in enumerate(self.spatial_dims)
+            }
         )
-        
+
         shape = tuple(
             [coord.shape[0] for coord in coords.values()]
         )
-        
+
         wannier = xr.DataArray(
             np.zeros(shape, dtype = complex),
             coords=coords
         )
-        
-        tot_x = self.potential.a1[0] * wannier.a1 + self.potential.a2[0] * wannier.a2
-        tot_y = self.potential.a1[1] * wannier.a1 + self.potential.a2[1] * wannier.a2
-                
+
+        # Cartesian coordinates over the whole tiled region, r_c = sum_i a[i][c] * a_i
         wannier = wannier.assign_coords(
-            {"x": tot_x, "y": tot_y}
+            {
+                name: sum(
+                    self.potential.a[i][c] * wannier.coords[dim]
+                    for i, dim in enumerate(self.spatial_dims)
+                )
+                for c, name in enumerate(self.coord_names)
+            }
         )
 
         print("Computing the mode profiles...")
-        for ikb1 in trange(self.eigve.sizes['kb1']):
-            for ikb2 in range(self.eigve.sizes['kb2']):
-                for ia1 in range(bounds1[1]-bounds1[0]):
-                    for ia2 in range(bounds2[1]-bounds2[0]):
-                        
-                        lcR = {
-                            'a1':slice(ia1*na1_coarse, (ia1+1)*na1_coarse),
-                            'a2':slice(ia2*na2_coarse, (ia2+1)*na2_coarse)
-                        }
-                        
-                        
-                        lcK = {
-                            'kb1':ikb1,
-                            'kb2':ikb2
-                        }
-                        
-                        kx = self.kx[lcK].item()
-                        ky = self.ky[lcK].item()
-                        
-                        x = wannier.x[lcR]
-                        y = wannier.y[lcR]
-                        
-                        coarse_eig.coords['a1'] = x.a1
-                        coarse_eig.coords['a2'] = x.a2
-                        
-                        phase = np.exp(-1j * (kx * x + ky * y))
-                        tmp = 0
-                        for i in range(U_mnk.sizes['m']):
-                            tmp += (U_mnk[lcK] * coarse_eig[lcK])[{'m':i}]
-                            
-                            
-                        tmp = tmp * phase
-                        # tmp = coarse_eig[lcK] * phase
-                                                                    
-                        wannier[lcR] += tmp.data
+        k_grid = [kc.transpose(*self.kb_dims) for kc in self.k]
+        k_indexes = list(itertools.product(*[range(n) for n in self.nb]))
 
-        tiled_pot = self.potential.coarsen(coarsen).tile(bounds1, bounds2)
-        
+        # Lay the spatial axes out last and contiguous, so a periodic block can simply be tiled over them
+        lead_dims = [d for d in wannier.dims if d not in self.spatial_dims]
+        wannier = wannier.transpose(*lead_dims, *self.spatial_dims)
+        acc = np.zeros(wannier.shape, dtype=complex)
+
+        # exp(-i k.r) is evaluated over the whole tiled region, so the cells need no separate handling
+        r_tiled = [
+            wannier.coords[name].transpose(*self.spatial_dims).values
+            for name in self.coord_names
+        ]
+        reps = [1] * len(lead_dims) + n_cells
+
+        for ik in tqdm(k_indexes):
+            lcK = {dim: ik[i] for i, dim in enumerate(self.kb_dims)}
+            k_cart = [float(kc[ik]) for kc in k_grid]
+
+            # The periodic part of the Bloch function is identical in every unit cell, so it is built
+            # once on the base cell and repeated, rather than re-derived for each cell in turn.
+            psi = (U_mnk[lcK] * coarse_eig[lcK]).sum("m").rename({"n": "m"})
+            psi = psi.transpose(*lead_dims, *self.spatial_dims).values
+
+            phase = np.exp(
+                -1j * sum(k_cart[c] * r_tiled[c] for c in range(self.n_dims))
+            )
+            acc += np.tile(psi, reps) * phase
+
+        wannier = wannier.copy(data=acc)
+
+        tiled_pot = self.potential.coarsen(coarsen).tile(bounds)
+
         wannier = wannier.rename({"m":"n"})
-        wannier = wannier / ((abs(wannier) ** 2).sum(["a1", "a2"]) * tiled_pot.get_dS()) ** 0.5
-            
+        wannier = wannier / ((abs(wannier) ** 2).sum(self.spatial_dims) * tiled_pot.get_dS()) ** 0.5
+
         return tiled_pot, wannier
         
   

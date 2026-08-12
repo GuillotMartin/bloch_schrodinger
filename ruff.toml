@@ -1,0 +1,39 @@
+# Ruff configuration for bloch_schrodinger.
+#
+# Kept in ruff.toml rather than pyproject.toml on purpose: the package is built from setup.py, and
+# introducing a pyproject.toml would also change which PEP 517 backend pip selects.
+#
+# Run with:   python -m ruff check .          (add --fix to apply the safe fixes)
+
+# Generated build output is a stale copy of the package, and the tutorials are prose as much as code:
+# neither is source anyone edits, so linting them only produces noise.
+extend-exclude = ["build", "docs"]
+
+[lint]
+# Deliberately narrow. Ruff's own default rule set is broad and shifts between releases, so it is
+# pinned here: this selection is the part that catches genuine mistakes (undefined or unused names,
+# imports that never resolve, shadowed definitions) plus import ordering, which is fixable
+# automatically. The package is clean under it, so any new finding means something actually changed.
+select = [
+    "E4", # import formatting
+    "E7", # statement-level mistakes
+    "E9", # syntax and IO errors
+    "F",  # pyflakes: the real bug catchers
+    "I",  # import sorting, all auto-fixable
+]
+
+# Rules worth turning on once the corresponding cleanup is done. The counts are from the audit of
+# 2026-08-12 and are recorded so the size of each job is known before starting it:
+#
+#   "B"    28x B905  zip() without an explicit strict=, a real source of silently truncated pairs
+#          13x B006  mutable default arguments, the `template: dict = {}` signatures in plotting.py
+#   "RUF"  13x RUF013 implicit Optional, `E_lim: float = None` should be `float | None`
+#          10x RUF059 unpacked-but-unused variables, mostly intentional (`eigva, eigve = ...`)
+#   "SIM"   5x SIM102 collapsible nested ifs
+#   "C4"   14x C408   dict() calls that could be literals
+#   "UP"    8x        mostly setup.py modernisations
+#
+# B006 and B905 are the two that describe real defects rather than style; the rest are cosmetic.
+
+[lint.isort]
+known-first-party = ["bloch_schrodinger"]

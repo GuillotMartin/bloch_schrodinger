@@ -1,9 +1,8 @@
+# from bloch_schrodinger.potential import Potential
 import numpy as np
 import xarray as xr
-from typing import Union
 from ipywidgets import FloatSlider, IntSlider
-# from bloch_schrodinger.potential import Potential
-import matplotlib.pyplot as plt
+
 
 ### ====================
 ### Sliders
@@ -29,7 +28,7 @@ def islinspace(arr: xr.DataArray) -> tuple[bool, float]:
 
 def create_sliders(
     arr: xr.DataArray, list_dims: list[str], start: str = "left"
-) -> dict[Union[IntSlider, FloatSlider]]:
+) -> dict[IntSlider | FloatSlider]:
     """Create a dictionnary of sliders from the dimensions of a DataArray.
 
     Args:
@@ -69,7 +68,7 @@ def create_sliders(
 
 def create_sliders_from_dims(
     coordinates: dict[xr.DataArray], start: str = "left"
-) -> dict[Union[IntSlider, FloatSlider]]:
+) -> dict[IntSlider | FloatSlider]:
     """Create a dictionnary of sliders from a dictionnary of dimensions.
 
     Args:
@@ -85,7 +84,7 @@ def create_sliders_from_dims(
         val = (
             coord.min().item()
             if start == "left"
-            else (coord.max().item() - coord.min().item()) / 2
+            else (coord.max().item() + coord.min().item()) / 2
         )
         islin, step = islinspace(coord)
         if np.issubdtype(coord.dtype, np.floating):
@@ -112,6 +111,44 @@ def create_sliders_from_dims(
 ### ====================
 ### Arrays
 ### ====================
+
+
+def empty_from_coords(
+    coord_arrays: list[xr.DataArray], dtype: type, name: str
+) -> xr.DataArray:
+    """Build a zero-filled DataArray whose dims/coords are the union of those found in coord_arrays.
+    Shared by the solvers to lay out their eigenvalue and eigenvector arrays.
+
+    Args:
+        coord_arrays (list[xr.DataArray]): The arrays whose dims/coords should be present in the result.
+        dtype (type): The dtype of the zero-filled data.
+        name (str): The name of the resulting DataArray.
+
+    Returns:
+        xr.DataArray: An empty DataArray with the proper shape.
+    """
+    all_coords = {}
+    for arr in coord_arrays:
+        for d in arr.dims:
+            if d not in all_coords:
+                # prefer coords over raw range
+                all_coords[d] = (
+                    arr.coords[d] if d in arr.coords else np.arange(arr.sizes[d])
+                )
+
+    shape = [
+        all_coords[d].sizes[d]
+        if isinstance(all_coords[d], xr.DataArray)
+        else len(all_coords[d])
+        for d in all_coords
+    ]
+
+    return xr.DataArray(
+        np.zeros(shape, dtype=dtype),
+        dims=list(all_coords.keys()),
+        coords=all_coords,
+        name=name,
+    )
 
 
 def coarsen(arr: xr.DataArray, factor: tuple[int, int]) -> xr.DataArray:
@@ -205,15 +242,16 @@ def tile(
 
 
 def create_cart_grid(
-    arr: xr.DataArray, resolution: Union[int, tuple[int]] = 100
+    arr: xr.DataArray, a: np.ndarray = None, resolution: int | tuple[int] = 100, endpoint: bool = False
 ) -> tuple[xr.DataArray]:
     """Create a cartesian grid describing a bounding box for a real-field array (like a Potential.V or a wavefunction array).
     This function's main goal is to be used as interpolation grids for plotting.
 
     Args:
         arr (xr.DataArray): The array to create a bounding box for.
-        resolution (Union[int, tuple[int]], optional): The resolution for the cartesian coordinates. If a single int is given, 
-        this will be the resolution of the coordinate with the longest extend. If a tuple is given, it much match the dimnesionality of the array, 
+        a (np.ndarray): The potential generating vectors, if None are given, they will be approximated using the array coordinates.
+        resolution (Union[int, tuple[int]], optional): The resolution for the cartesian coordinates. If a single int is given,
+        this will be the resolution of the coordinate with the longest extend. If a tuple is given, it much match the dimnesionality of the array,
         and each cartesian coordinates will be given the specified resolution. Default to 100.
     Returns:
         tuple[xr.DataArray]: Three arrays "x", "y", "z" with dimensions "ai".
@@ -224,55 +262,43 @@ def create_cart_grid(
     )  # Determines the cartesian dimension of the array
     name_coords = ["x", "y", "z"]  # Cartesian coordinates names
 
-    a = np.zeros((n_dims, n_dims))  # Reconstructing the gen,erating unit vectors
+    if a is None:
+        a = np.zeros((n_dims, n_dims))  # Reconstructing the generating unit vectors
 
-    origin = [0] * n_dims
+        origin = [0] * n_dims
+        for i in range(n_dims):
+            end = [0] * n_dims
+            end[i] = -1
+            for j in range(n_dims):
+                a[i, j] = (
+                    arr.coords[name_coords[j]][*end]
+                    - arr.coords[name_coords[j]][*origin]
+                ) / max(
+                    int(arr.coords[f"a{i + 1}"][-1] - arr.coords[f"a{i + 1}"][0]), 1
+                )
+
+    mins = np.zeros(n_dims)
+    maxs = np.zeros(n_dims)
     for i in range(n_dims):
-        end = [0] * n_dims
-        end[i] = -1
-        for j in range(n_dims):
-            a[i, j] = arr.coords[name_coords[j]][*end] - arr.coords[name_coords[j]][*origin]
+        mins[i] = arr.coords[name_coords[i]].min()
+        maxs[i] = arr.coords[name_coords[i]].max()
 
-    # Creating the bounding box
-    if n_dims == 3:
-        perms = np.array([
-            [1,1,1], [1,1,-1], [1,-1,1], [-1,1,1], 
-            [-1,-1,1], [-1,1,-1], [1,-1,-1], [-1,-1,-1]
-        ])
-    elif n_dims == 2:
-        perms = np.array([
-            [1,1], [1,-1], [-1,1], [-1,-1], 
-        ])
-    else:
-        perms = np.array([
-            [1],[-1], 
-        ])
-    
-    vertices = perms@a/2
-    mins  = np.min(vertices, axis=0)
-    maxs  = np.max(vertices, axis=0)
     rng = maxs - mins
     ## Setting  the resolution
     if isinstance(resolution, int):
-        tmp_resolution = [0]*3
+        tmp_resolution = [0] * 3
         longest = np.argmax(rng)
         tmp_resolution[longest] = resolution
         for i in range(n_dims):
             if i != longest:
                 tmp_resolution[i] = int(resolution * rng[i] / np.max(rng))
-          
+
         resolution = tmp_resolution
-        
-    
+
     coords = []
     for i in range(n_dims):
-        coo = np.linspace(mins[i], maxs[i], resolution[i], endpoint=False)
-        coords += [
-            xr.DataArray(
-                coo, coords = {name_coords[i]+"n":coo}
-            )
-        ]
-
+        coo = np.linspace(mins[i], maxs[i], resolution[i], endpoint=endpoint)
+        coords += [xr.DataArray(coo, coords={name_coords[i] + "n": coo})]
 
     M = np.linalg.inv(a).T
 
@@ -281,25 +307,10 @@ def create_cart_grid(
         inv_coo = 0
         for j in range(n_dims):
             inv_coo = inv_coo + M[i, j] * coords[j]
-        inv_coords +=[inv_coo]
-    
+        inv_coords += [inv_coo]
+
     return inv_coords
 
-    
-
-    # ax = plt.figure().add_subplot(projection='3d')
-    # ax.plot(
-    #     xs = [-sum_a[0]/2, sum_a[0]/2],
-    #     ys = [-sum_a[1]/2, sum_a[1]/2],
-    #     zs = [-sum_a[2]/2, sum_a[2]/2],
-    #     )
-    # ax.set_xlim(-extrm[0]/2, extrm[0]/2)
-    # ax.set_ylim(-extrm[1]/2, extrm[1]/2)
-    # ax.set_zlim(-extrm[2]/2, extrm[2]/2)
-    # ax.set_xlabel('X')
-    # ax.set_ylabel('Y')
-    # ax.set_zlabel('Z')
-    # plt.show()
 
 # if __name__ == "__main__":
 #     # from bloch_schrodinger.potential import create_parameter

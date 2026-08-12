@@ -9,7 +9,7 @@ import os
 import sys
 from shutil import rmtree
 
-from setuptools import find_packages, setup, Command
+from setuptools import Command, find_packages, setup
 
 # Package meta-data.
 NAME = 'bloch_schrodinger'
@@ -33,6 +33,8 @@ REQUIRED = [
     'pyparsing', 
     'jupyter-bokeh',
     'matplotlib',
+    'plotly',
+    'scikit-image',
     'ipympl',
     'tqdm',
     'joblib',
@@ -41,7 +43,7 @@ REQUIRED = [
 
 # What packages are optional?
 EXTRAS = {
-    # 'fancy feature': ['django'],
+    'dev': ['pytest'],
 }
 
 # The rest you shouldn't have to touch too much :)

@@ -1,5 +1,4 @@
-from scipy.constants import h, hbar, m_u, c, eV
-
+from scipy.constants import c, eV, h, hbar, m_u
 
 ## Functions used to make conversions between a natural units to SI units
 ## We assume hbar = m = 1, with m the atomic species used. Its value can be changed here

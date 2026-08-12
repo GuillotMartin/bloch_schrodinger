@@ -1,13 +1,14 @@
+import itertools
+
 import numpy as np
-import xarray as xr
-from typing import Union
-from bloch_schrodinger.potential import Potential
 import scipy.sparse as sps
-from tqdm import tqdm
-from scipy.sparse.linalg import eigsh
-import warnings
+import xarray as xr
 from joblib import Parallel, delayed
-from numpy.linalg import svd, inv
+from scipy.sparse.linalg import eigsh
+from tqdm import tqdm
+
+from bloch_schrodinger.potential import Potential
+from bloch_schrodinger.utils import empty_from_coords
 
 
 def real(arr: xr.DataArray) -> xr.DataArray:
@@ -18,29 +19,25 @@ def imag(arr: xr.DataArray) -> xr.DataArray:
     return xr.apply_ufunc(np.imag, arr)
 
 
-def check_name(name: str):
-    """Check wether the name is a valid one. and raises an error if not.
+def check_name(name: str, n_dims: int):
+    """Check whether the name is a valid one, and raises an error if not.
 
     Args:
         name (str): The name to check
+        n_dims (int): The dimensionality of the solver, used to generate the list of forbidden names.
 
     Raises:
         ValueError: If the name is forbidden
     """
 
-    forbidden_names = [
-        "field",
-        "band",
-        "a1",
-        "a2",
-        "x",
-        "y",
-        "dx",
-        "dy",
-        "dx2",
-        "dy2",
-        "lap",
-    ]
+    coord_names = ["x", "y", "z"][:n_dims]
+    # Names that would otherwise collide with dims/coords used internally
+    forbidden_names = (
+        ["field", "band", "lap"]
+        + [f"a{i + 1}" for i in range(n_dims)]
+        + coord_names
+        + [f"d{c}" for c in coord_names]
+    )
     if name in forbidden_names:
         raise ValueError(
             f"{name} is not a valid name for the object, as it is already used. The forbidden names are: {forbidden_names}"
@@ -52,8 +49,8 @@ class FDSolver:
 
     def __init__(
         self,
-        potentials: Union[Potential, list[Potential]],
-        alphas: Union[Union[float, xr.DataArray], list[Union[float, xr.DataArray]]],
+        potentials: Potential | list[Potential],
+        alphas: float | xr.DataArray | list[float | xr.DataArray],
     ):
         """Instantiate the solver.
 
@@ -64,13 +61,12 @@ class FDSolver:
             A single coefficient can be passed for a scalar equation.
 
         Raises:
-            ValueError: Not the same number of potentials and kinetic terms given.
+            ValueError: If potentials and alphas don't have the same length, or if the potentials don't
+            all share the same dimensionality and resolution.
         """
 
         if isinstance(potentials, Potential) and (
-            isinstance(alphas, float)
-            or isinstance(alphas, int)
-            or isinstance(alphas, xr.DataArray)
+            isinstance(alphas, (float, int, xr.DataArray))
         ):
             self.potentials = [potentials]
             self.alphas = [alphas]
@@ -83,63 +79,65 @@ class FDSolver:
             else:
                 raise ValueError("potentials and alphas not of the same length")
 
+        self.n_dims = self.potentials[0].n_dims
+        self.spatial_dims = [f"a{i + 1}" for i in range(self.n_dims)]
+        if any(
+            pot.n_dims != self.n_dims or pot.resolution != self.potentials[0].resolution
+            for pot in self.potentials
+        ):
+            raise ValueError(
+                "All potentials must share the same dimensionality and resolution"
+            )
+
         # storing all parameter coordinates from potentials and alphas. The final solver will run on all these dimensions.
         self.allcoords = {}
         for pot in self.potentials:
             coords_pot = {
                 dim: ["potential", pot.V.coords[dim]]
                 for dim in pot.V.dims
-                if dim not in ["a1", "a2"]
+                if dim not in self.spatial_dims
             }
             self.allcoords.update(coords_pot)
 
         for alph in self.alphas:
             if isinstance(alph, xr.DataArray):
                 for dim in alph.dims:
-                    check_name(dim)
+                    check_name(dim, self.n_dims)
                     coords_alpha = {
                         dim: ["alpha", alph.coords[dim]] for dim in alph.dims
                     }
                     self.allcoords.update(coords_alpha)
 
-        self.kx = 0  # The solver assumes that kx = 0 if not specified otherwise
-        self.ky = 0  # The solver assumes that ky = 0 if not specified otherwise
+        self.k = (
+            [0] * self.n_dims
+        )  # The solver assumes k = 0 along every axis if not specified otherwise
 
-        self.a1_coord = self.potentials[0].V.coords["a1"]
-        self.a2_coord = self.potentials[0].V.coords["a2"]
-        self.a1 = self.potentials[0].a1  # The first lattice vector
-        self.a2 = self.potentials[0].a2  # The second lattice vector
-        self.e1 = self.a1 / (self.a1 @ self.a1) ** 0.5  # normalized lattice vector
-        self.e2 = self.a2 / (self.a2 @ self.a2) ** 0.5  # normalized lattice vector
-        self.na1 = self.potentials[0].V.sizes['a1']  # discretization along a1
-        self.na2 = self.potentials[0].V.sizes['a2']  # discretization along a2
-        self.np = self.na1 * self.na2  # Number of mesh sampling points
+        self.a_coords = [
+            self.potentials[0].V.coords[f"a{i + 1}"] for i in range(self.n_dims)
+        ]
+        self.a = self.potentials[0].a  # The lattice vectors
+        self.n_a = [
+            self.potentials[0].V.sizes[f"a{i + 1}"] for i in range(self.n_dims)
+        ]  # discretization along each axis
+        self.np = int(np.prod(self.n_a))  # Number of mesh sampling points
 
         self.n = (
             self.np * self.nb
         )  # Total number of points, when counting all the fields
 
         self.g = np.linalg.inv(
-            np.array(  # The metric, important to compute derivative operators
-                [[1, self.e1 @ self.e2], [self.e2 @ self.e1, 1]]
-            )
-        )
+            self.a @ self.a.T
+        )  # The metric, important to compute derivative operators
 
-        # length steps along a1 and a2
-        self.da1 = (
-            float(abs(self.potentials[0].V.a1[1] - self.potentials[0].V.a1[0]))
-            * (self.a1 @ self.a1) ** 0.5
-        )  # smallest increment of length along a1
-        self.da2 = (
-            float(abs(self.potentials[0].V.a2[1] - self.potentials[0].V.a2[0]))
-            * (self.a2 @ self.a2) ** 0.5
-        )  # smallest increment of length along a2
+        self.da = self.potentials[0].da  # length increments along each axis
 
         # Initializing the coupling evalution context and the coupling expressions
         self.coupling_context = {"np": np, "real": real, "imag": imag}
         self.couplings = []
 
-        self.maxsearch = min(min(self.na1, self.na2)//2-2, 10)  # The maximal distance (inf norm) to look for shells.
+        self.maxsearch = min(
+            min(self.n_a) // 2 - 2, 10
+        )  # The maximal distance (inf norm) to look for shells.
         self.create_stencil()
         # computing the sparse matrices needed
         self.potential_matrix()
@@ -151,14 +149,14 @@ class FDSolver:
         return f"Solver object \n size ({self.n}, {self.n}), with {self.nb} field(s) \n dimensions: {shape}"
 
     def potential_matrix(self):
-        """prepare the potentials in a shape that can be instanciated as sparse matrices very efficiently"""
+        """Prepare the potentials in a shape that can be instantiated as sparse matrices very efficiently"""
 
         # flattening the potentials
-        Vflats = [pot.V.stack(idiag=["a1", "a2"]) for pot in self.potentials]
+        Vflats = [pot.V.stack(idiag=self.spatial_dims) for pot in self.potentials]
 
         # Expanding each potential dimensions to the full parameter space, composed of all dimensions of each potential
         for i, V in enumerate(Vflats):
-            V = V.drop_vars(["idiag", "a1", "a2"]).assign_coords(
+            V = V.drop_vars(["idiag", *self.spatial_dims]).assign_coords(
                 idiag=("idiag", np.arange(i * self.np, (i + 1) * self.np))
             )
             for d, coords in self.allcoords.items():
@@ -171,38 +169,35 @@ class FDSolver:
         self.potential_data = xr.concat(Vflats, dim="idiag")
 
     def create_stencil(self):
-        """Creates the stencil for the gradient and laplacian operator definitions, see https://arxiv.org/pdf/0708.0650 sec. 3.2 for more details."""
-        X, Y = self.potentials[0].x, self.potentials[0].y
-        i0, j0 = self.na1 // 2, self.na2 // 2
-        x0, y0 = X[i0, j0].item(), Y[i0, j0].item()
+        """Creates the stencil for the gradient and laplacian operator definitions. For 2D, follows
+        https://arxiv.org/pdf/0708.0650 sec. 3.2 exactly (2nd-moment isotropy plus a 4th-order anisotropy
+        cancellation). For other dimensionalities, only the leading-order (2nd-moment) isotropy condition
+        sum_b w_b b_i b_j = delta_ij is enforced, which is dimension-agnostic but less refined than the 2D case."""
+        coords = self.potentials[0].coords  # cartesian coordinates, one array per axis
+        center_idx = tuple(n // 2 for n in self.n_a)
+        origin = np.array([coords[d][center_idx].item() for d in range(self.n_dims)])
 
         lim = self.maxsearch
-        # Computing the distances in index and cartesian coordinates for a few shells
-        I, J, xs, ys, Dist = [], [], [], [], []  # noqa: E741
-        for i in range(-lim, lim + 1):
-            for j in range(-lim, lim + 1):
-                if not (i == 0 and j == 0):
-                    x1, y1 = X[i0 + i, j0 + j].item(), Y[i0 + i, j0 + j].item()
-                    dist = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
-                    Dist += [dist]
-                    I += [i]  # noqa: E741
-                    J += [j]
-                    xs += [x1 - x0]
-                    ys += [y1 - y0]
-                    
-        I = np.array(I)  # noqa: E741
-        J = np.array(J)
+        # Computing the displacements in index and cartesian coordinates for a few shells
+        offsets, disp, Dist = [], [], []
+        for offset in itertools.product(range(-lim, lim + 1), repeat=self.n_dims):
+            if any(offset):
+                idx = tuple(center_idx[d] + offset[d] for d in range(self.n_dims))
+                point = np.array([coords[d][idx].item() for d in range(self.n_dims)])
+                vec = point - origin
+                offsets += [offset]
+                disp += [vec]
+                Dist += [float(np.linalg.norm(vec))]
+
+        offsets = np.array(offsets)
+        disp = np.array(disp)
         Dist = np.array(Dist)
-        xs = np.array(xs)
-        ys = np.array(ys)
 
         # Sorting all the points by ascending distance to the central one
         sorting = np.argsort(Dist)
-        I_sorted = I[sorting]
-        J_sorted = J[sorting]
+        offsets_sorted = offsets[sorting]
+        disp_sorted = disp[sorting]
         Dist_sorted = Dist[sorting]
-        xs_sorted = xs[sorting]
-        ys_sorted = ys[sorting]
 
         # Sorting the points by shell number
         shell_distance, start_shell, shell_index, n_in_shell = np.unique(
@@ -212,83 +207,42 @@ class FDSolver:
             return_counts=True,
         )
 
-        # Solve for the weights, keep adding shells until a
+        def shell_moment(s, i, j):
+            m = slice(start_shell[s], start_shell[s] + n_in_shell[s])
+            return np.sum(disp_sorted[m, i] * disp_sorted[m, j])
+
+        def shell_moment4(s):
+            # Extra 2D-only 4th-order anisotropy cancellation
+            m = slice(start_shell[s], start_shell[s] + n_in_shell[s])
+            x, y = disp_sorted[m, 0], disp_sorted[m, 1]
+            return np.sum(x**4 - y**4), np.sum(x**2 * y**2 - (1 / 3) * x**4)
+
+        # The moment conditions defining an isotropic Laplacian: sum_b w_b b_i b_j = delta_ij
+        pairs = [(i, j) for i in range(self.n_dims) for j in range(i, self.n_dims)]
+        q = [1.0 if i == j else 0.0 for i, j in pairs]
+        if self.n_dims == 2:
+            q += [0.0, 0.0]
+        q = np.array(q)
+
+        # Solve for the weights, keep adding shells until solvable
         solved = False
         nshell = 1
         while not solved:
-            q = np.array([1, 0, 1, 0, 0]) # solving for minimal third order anisotropy
-            A_js = np.array(
-                [
-                    [
-                        sum(
-                            [
-                                xs_sorted[start_shell[s] + m]
-                                * xs_sorted[start_shell[s] + m]
-                                for m in range(n_in_shell[s])
-                            ]
-                        )
-                        for s in range(nshell)
-                    ],
-                    [
-                        sum(
-                            [
-                                xs_sorted[start_shell[s] + m]
-                                * ys_sorted[start_shell[s] + m]
-                                for m in range(n_in_shell[s])
-                            ]
-                        )
-                        for s in range(nshell)
-                    ],
-                    [
-                        sum(
-                            [
-                                ys_sorted[start_shell[s] + m]
-                                * ys_sorted[start_shell[s] + m]
-                                for m in range(n_in_shell[s])
-                            ]
-                        )
-                        for s in range(nshell)
-                    ],
-                    # 4th moments (isotropy)
-                    [
-                        sum(
-                            xs_sorted[start_shell[s] + m] ** 4
-                            - ys_sorted[start_shell[s] + m] ** 4
-                            for m in range(n_in_shell[s])
-                        )
-                        for s in range(nshell)
-                    ],
-                    [
-                        sum(
-                            xs_sorted[start_shell[s] + m] ** 2
-                            * ys_sorted[start_shell[s] + m] ** 2
-                            - (1 / 3) * xs_sorted[start_shell[s] + m] ** 4
-                            for m in range(n_in_shell[s])
-                        )
-                        for s in range(nshell)
-                    ],
-                ],
-            )
+            A_js = [[shell_moment(s, i, j) for s in range(nshell)] for i, j in pairs]
+            if self.n_dims == 2:
+                fourth = [shell_moment4(s) for s in range(nshell)]
+                A_js += [[f[0] for f in fourth], [f[1] for f in fourth]]
+            A_js = np.array(A_js)
 
-            U, Sdiag, Vh = svd(A_js, full_matrices=False)
-            S = np.diag(Sdiag)
-
-            V = np.transpose(np.conjugate(Vh))
-            Uh = np.transpose(np.conjugate(U))
-
-            w = V @ inv(S) @ Uh @ q
-            # print(w)
-            # print(A_js @ w)
+            # Minimum-norm least-squares solve; robust to A_js being rank-deficient
+            # at some shell counts (common in 3D, where symmetric shells can have
+            # exactly zero cross-axis moments).
+            w = np.linalg.pinv(A_js) @ q
             if np.all(np.isclose(A_js @ w, q)):
                 solved = True
                 self.n_shell = nshell
             else:
                 nshell += 1
-            # if (
-            #     nshell > lim
-            # ):  # Relaunch a search with more shells if maxsearch was too small
-            #     self.maxsearch += 2
-            #     self.create_stencil()
 
         weights = []
         neighbors = []
@@ -296,17 +250,19 @@ class FDSolver:
         for s in range(nshell):
             for m in range(n_in_shell[s]):
                 indx = start_shell[s] + m
-                neighbors_indexes += [(I_sorted[indx], J_sorted[indx])]
-                neighbors += [[xs_sorted[indx], ys_sorted[indx]]]
+                neighbors_indexes += [tuple(offsets_sorted[indx])]
+                neighbors += [list(disp_sorted[indx])]
                 weights += [w[s]]
 
         self.stencil_size = len(weights)
         self.weights = xr.DataArray(weights, coords={"b": np.arange(self.stencil_size)})
         self.neighbors = xr.DataArray(
-            neighbors, coords={"b": np.arange(self.stencil_size), "xy": [0, 1]}
+            neighbors,
+            coords={"b": np.arange(self.stencil_size), "axis": np.arange(self.n_dims)},
         )
         self.neighbors_indexes = xr.DataArray(
-            neighbors_indexes, coords={"b": np.arange(self.stencil_size), "ij": [0, 1]}
+            neighbors_indexes,
+            coords={"b": np.arange(self.stencil_size), "axis": np.arange(self.n_dims)},
         )
 
         # --- Find the second order weights ---
@@ -331,120 +287,121 @@ class FDSolver:
             weights = {}
 
             # Generate all second derivative index pairs (i <= j for symmetry)
-            index_pairs = [(i,j) for i in range(d) for j in range(i, d)]
+            index_pairs = [(i, j) for i in range(d) for j in range(i, d)]
 
             # Precompute the b_m * b_n for each b vector
             # shape: (N, d, d)
-            b_outer = np.einsum('bi,bj->bij', b_vectors, b_vectors)
+            b_outer = np.einsum("bi,bj->bij", b_vectors, b_vectors)
 
-            for i,j in index_pairs:
+            for i, j in index_pairs:
                 # Right-hand side: 2 * delta_{im} delta_{jn} from Taylor expansion
                 # We want only one component to be 2, rest 0 in least-squares sense
                 B = np.zeros((d, d))
-                B[i,j] = 2.0
+                B[i, j] = 2.0
 
                 # Flatten b_outer to shape (N, d*d) for least squares
-                A = b_outer.reshape(N, d*d)
+                A = b_outer.reshape(N, d * d)
 
                 # Flatten B to shape (d*d,)
                 B_flat = B.flatten()
 
                 # Solve least-squares: A^T w = B_flat
-                # Actually we want weights of length N, so transpose:
-                # sum_b w_b * b_m * b_n = B_mn
-                # Solve A^T w = B_flat
-                # A^T: shape (d*d, N)
                 w, residuals, rank, s = np.linalg.lstsq(A.T, B_flat, rcond=None)
-                weights[(i,j)] = w
+                weights[(i, j)] = w
                 # If i != j, enforce symmetry: omega_{ij} = omega_{ji}
                 if i != j:
-                    weights[(j,i)] = w
+                    weights[(j, i)] = w
 
             return weights
-        
+
         self.weights2 = compute_hessian_weights(neighbors)
 
-        # print(self.weights)
-        # print(self.neighbors)
-        # print(self.neighbors_indexes)
-
-        # fig, ax = plt.subplots()
-        # ax.scatter(xs_sorted, ys_sorted, c= shell_index % 10, cmap="Set1")
-        # ax.set_aspect("equal")
-        # plt.show()
-        
-    def compute_hopping(self, delta_i: int, delta_j: int)->sps.spmatrix:
-        """Compute the hopping matrix connecting the site (i,j) to the site (i + delta_i, j+delta_j), 
+    def compute_hopping(self, delta: tuple[int]) -> sps.spmatrix:
+        """Compute the hopping matrix connecting each site to the site shifted by delta,
         taking care of the periodic boundaries.
 
         Args:
-            delta_i (int): Hopping along a1
-            delta_j (int): Hopping along a2
+            delta (tuple[int]): The shift to apply along each axis (a1, a2, ...).
 
         Returns:
             sps.spmatrix: A (np,np) sparse matrix containing the hopping matrix.
         """
         indx_start = np.arange(self.np)
-        i_start, j_start = indx_start//self.na2, indx_start%self.na2
-        
-        i_end, j_end = (i_start + delta_i)%self.na1, (j_start + delta_j)%self.na2
-        
-        indx_end = i_end * self.na2 + j_end
+        idx_start = np.unravel_index(indx_start, self.n_a)
 
-        # diag = np.zeros((self.np, self.np), dtype = int)
-        # diag[indx_start, indx_end] = 1
-        
-        all_offset = indx_end-indx_start
+        idx_end = tuple(
+            (idx_start[d] + delta[d]) % self.n_a[d] for d in range(self.n_dims)
+        )
+
+        indx_end = np.ravel_multi_index(idx_end, self.n_a)
+
+        all_offset = indx_end - indx_start
         offsets = np.unique(all_offset)
         frac_diags = []
         for offset in offsets:
             frac_diags += [np.roll(np.where(all_offset == offset, 1, 0), offset)]
-        
-        spsdiag = sps.dia_matrix((frac_diags, offsets), shape = (self.np, self.np))
+
+        spsdiag = sps.dia_matrix((frac_diags, offsets), shape=(self.np, self.np))
         return spsdiag
 
     def compute_grad(self):
-        """compute the gradient and derivation operators"""        
+        """Compute the gradient and derivation operators, one per axis (self.d[axis])"""
         ## We use the stencil formula for symmetric shells
-        dy = sps.dia_matrix((self.np, self.np), dtype=float)
-        dx = sps.dia_matrix((self.np, self.np), dtype=float)
+        self.d = [
+            sps.dia_matrix((self.np, self.np), dtype=float) for _ in range(self.n_dims)
+        ]
         for i in range(self.stencil_size):
-            hop = self.compute_hopping(
-                self.neighbors_indexes[i,0].item(),
-                self.neighbors_indexes[i,1].item()
-            ) - sps.eye(self.np, self.np)
-            dx += hop * self.neighbors[i,0].item() * self.weights[i].item()
-            dy += hop * self.neighbors[i,1].item() * self.weights[i].item()
-      
-        self.dx, self.dy = dx, dy
-        
+            delta = tuple(
+                int(self.neighbors_indexes[i, d].item()) for d in range(self.n_dims)
+            )
+            hop = self.compute_hopping(delta) - sps.eye(self.np, self.np)
+            w = self.weights[i].item()
+            for d in range(self.n_dims):
+                self.d[d] += hop * self.neighbors[i, d].item() * w
+
+        # Named aliases for the common low-dimensional cases
+        if self.n_dims >= 1:
+            self.dx = self.d[0]
+        if self.n_dims >= 2:
+            self.dy = self.d[1]
+        if self.n_dims >= 3:
+            self.dz = self.d[2]
 
     def compute_laplacian(self):
-        """Compute the laplacian and second order derivation operators"""
-        
+        """Compute the laplacian and second order derivation operators, self.d2[(i,j)] for every axis pair"""
+
         self.lap = sps.dia_matrix((self.np, self.np), dtype=float)
-        self.dx_sec = sps.dia_matrix((self.np, self.np), dtype=float)
-        self.dy_sec = sps.dia_matrix((self.np, self.np), dtype=float)
-        self.dxdy = sps.dia_matrix((self.np, self.np), dtype=float)
-        self.dydx = sps.dia_matrix((self.np, self.np), dtype=float)
+        upper = [(i, j) for i in range(self.n_dims) for j in range(i, self.n_dims)]
+        self.d2 = {
+            pair: sps.dia_matrix((self.np, self.np), dtype=float) for pair in upper
+        }
 
         for i in range(self.stencil_size):
-            hop = self.compute_hopping(
-                self.neighbors_indexes[i,0].item(),
-                self.neighbors_indexes[i,1].item()
-            ) - sps.eye(self.np, self.np)
-            
-            w =  self.weights[i].item()
-            
-            self.lap += hop * w * 2
-            self.dx_sec += hop * self.weights2[(0,0)][i]
-            self.dy_sec += hop * self.weights2[(1,1)][i]
-            self.dxdy += hop * self.weights2[(0,1)][i]
-            self.dydx += hop * self.weights2[(1,0)][i]
+            delta = tuple(
+                int(self.neighbors_indexes[i, d].item()) for d in range(self.n_dims)
+            )
+            hop = self.compute_hopping(delta) - sps.eye(self.np, self.np)
 
+            w = self.weights[i].item()
+
+            self.lap += hop * w * 2
+            for a, b in upper:
+                self.d2[(a, b)] += hop * self.weights2[(a, b)][i]
+
+        # mirror the off-diagonal entries so self.d2[(j,i)] is also directly accessible
+        for a, b in upper:
+            if a != b:
+                self.d2[(b, a)] = self.d2[(a, b)]
+
+        # Named aliases for the common 2D case
+        if self.n_dims == 2:
+            self.dx_sec = self.d2[(0, 0)]
+            self.dy_sec = self.d2[(1, 1)]
+            self.dxdy = self.d2[(0, 1)]
+            self.dydx = self.d2[(1, 0)]
 
     def compute_full_operators(self, alphas: list[float]):
-        """Compute all the total kinetic operators for each fields, as bloch sparse matrices
+        """Compute all the total kinetic operators for each fields, as block sparse matrices
 
         Args:
             alphas (list[float]): The list of alphas to use
@@ -454,71 +411,73 @@ class FDSolver:
         alphaIdent = [
             alphas[u] * sps.eye_array(n=self.np, m=self.np) for u in range(self.nb)
         ]
-        alphaDx = [alphas[u] * self.dx for u in range(self.nb)]
-        alphaDy = [alphas[u] * self.dy for u in range(self.nb)]
+        alphaD = [
+            [alphas[u] * self.d[axis] for u in range(self.nb)]
+            for axis in range(self.n_dims)
+        ]
         alphaLap = [alphas[u] * self.lap for u in range(self.nb)]
         # create the full matrices
         self.alphaIdent = sps.block_diag(alphaIdent)
-        self.alphaDx = sps.block_diag(alphaDx)
-        self.alphaDy = sps.block_diag(alphaDy)
+        self.alphaD = [sps.block_diag(alphaD[axis]) for axis in range(self.n_dims)]
         self.alphaLap = sps.block_diag(alphaLap)
 
-    def compute_kinetic(self, k: tuple[float] = (0, 0)) -> sps.dia_matrix:
+    def compute_kinetic(self, k: list[float]) -> sps.dia_matrix:
         """Compute the total kinetic operator.
 
         Args:
-            k (tuple[float]): The k vector. default to (0,0)
+            k (list[float]): The k vector, one component per axis.
         """
-        return (
-            -self.alphaLap
-            + 2 * 1j * (k[0] * self.alphaDx + k[1] * self.alphaDy)
-            + (k[0] ** 2 + k[1] ** 2) * self.alphaIdent
-        )
+        # Bloch substitution -grad^2 -> -(grad + ik)^2, expanded term by term
+        kinetic = -self.alphaLap
+        for axis in range(self.n_dims):
+            kinetic = (
+                kinetic
+                + 2j * k[axis] * self.alphaD[axis]
+                + k[axis] ** 2 * self.alphaIdent
+            )
+        return kinetic
 
-    def set_reciprocal_space(
-        self, kx: Union[float, xr.DataArray], ky: Union[float, xr.DataArray]
-    ):
+    def set_reciprocal_space(self, k: list[float | xr.DataArray]):
         """Add the reciprocal space to the list of coordinates.
 
         Args:
-            kx (Union[float,xr.DataArray]): kx coordinate, can be a single float, a 1D xarray coordinate or even a multidimensional coordinate.
-            ky (Union[float,xr.DataArray]): ky coordinate, can be a single float, a 1D xarray coordinate or even a multidimensional coordinate.
+            k (list[Union[float,xr.DataArray]]): The k vector components, one per axis. Each component can be
+            a single float, a 1D xarray coordinate, or even a multidimensional coordinate.
         """
-        if isinstance(kx, xr.DataArray):
-            self.allcoords.update(
-                {dim: ["reciprocal", kx.coords[dim]] for dim in kx.dims}
-            )
-        if isinstance(ky, xr.DataArray):
-            self.allcoords.update(
-                {dim: ["reciprocal", ky.coords[dim]] for dim in ky.dims}
-            )
+        for ki in k:
+            if isinstance(ki, xr.DataArray):
+                self.allcoords.update(
+                    {dim: ["reciprocal", ki.coords[dim]] for dim in ki.dims}
+                )
 
-        self.kx = kx
-        self.ky = ky
+        self.k = list(k)
 
-    def create_reciprocal_grid(
-        self, kx: Union[float, np.ndarray] = 0, ky: Union[float, np.ndarray] = 0
-    ):
+    def create_reciprocal_grid(self, k: list[float | np.ndarray] | None = None):
         """Create the k-space grid on which the eigenvalues and vectors will be computed
 
         Args:
-            kx (float or np.ndarray): The values of kx for the grid points. default to 0.
-            ky (float or np.ndarray): The values of ky for the grid points. default to 0.
+            k (list[float or np.ndarray], optional): The values of k for the grid points, one per axis.
+            Defaults to 0 along every axis.
         """
-        if isinstance(kx, float) or isinstance(kx, int):
-            kx = xr.DataArray(np.array([kx]), coords={"kx": np.array([kx])}, dims="kx")
-        else:
-            kx = xr.DataArray(kx, coords={"kx": kx}, dims="kx")
+        if k is None:
+            k = [0] * self.n_dims
 
-        if isinstance(ky, float) or isinstance(ky, int):
-            ky = xr.DataArray(np.array([ky]), coords={"ky": np.array([ky])}, dims="ky")
-        else:
-            ky = xr.DataArray(ky, coords={"ky": ky}, dims="ky")
+        k_names = ["kx", "ky", "kz"][: self.n_dims]
+        k_arrays = []
+        for name, ki in zip(k_names, k):
+            if isinstance(ki, float) or isinstance(ki, int):
+                k_arrays += [
+                    xr.DataArray(
+                        np.array([ki]), coords={name: np.array([ki])}, dims=name
+                    )
+                ]
+            else:
+                k_arrays += [xr.DataArray(ki, coords={name: ki}, dims=name)]
 
-        self.set_reciprocal_space(kx, ky)
+        self.set_reciprocal_space(k_arrays)
 
     def add_coupling_parameter(
-        self, name: str, parameter: Union[float, int, complex, np.ndarray, xr.DataArray]
+        self, name: str, parameter: complex | np.ndarray | xr.DataArray
     ):
         """Add a parameter to the coupling evaluation context or to the list of dimensions.
 
@@ -526,18 +485,13 @@ class FDSolver:
             name (str): The name of the coupling parameter, if the parameter given is an xarray, its name will be overwritten by this argument. must be unique.
             parameter (Union[float,int,complex,xr.DataArray]): The value(s) of the parameter.
         """
-        check_name(name)
-
-        if name in self.coupling_context:
-            raise ValueError(f"{name} already present in the coupling context")
+        check_name(name, self.n_dims)
 
         if name in self.coupling_context:
             raise ValueError(f"{name} already present in the coupling context")
 
         if (
-            isinstance(parameter, float)
-            or isinstance(parameter, complex)
-            or isinstance(parameter, int)
+            isinstance(parameter, (float, complex, int))
         ):
             self.coupling_context.update({name: parameter})
         else:
@@ -556,14 +510,16 @@ class FDSolver:
         self, name: str, struct: sps.spmatrix, field1: int, field2: int
     ):
         """Add a sparse matrix to the coupling context, to be evaluated during Hamiltonian construction.
+        The conjugate transpose term (field2, field1) is added automatically, so the resulting block is Hermitian.
 
         Args:
             name (str): The name of the matrix to call during evaluation, must be unique.
             struct (sps.spmatrix): A (self.np,self.np) sparse matrix containing the structure of the coupling term.
-            hermitian (bool): Wheter to add also the
+            field1 (int): The origin field of the coupling.
+            field2 (int): The target field of the coupling.
         """
 
-        check_name(name)
+        check_name(name, self.n_dims)
 
         shape = [[None, None], [None, None]]
         shape[field1][field2] = struct
@@ -574,7 +530,7 @@ class FDSolver:
 
     def add_coupling(self, expr: str):
         """Add a coupling expression to the list of couplings. The coupling expression is a string that will be evaluated at Hamiltonian building phase.
-        It can use all parameters and matrices set by 'add_coupling_parameter' and 'add_coupling_matrices', as well as the other parameters of the potentials and alphas.
+        It can use all parameters and matrices set by 'add_coupling_parameter' and 'add_coupling_matrix', as well as the other parameters of the potentials and alphas.
         Be careful to not multiply a matrix by an imaginary number, as it will break hermiticity. You should instead create a purely imaginary Hermitian matrix then multiply it by a real value
 
         Args:
@@ -586,7 +542,6 @@ class FDSolver:
         """Add a simple, local coupling term between two field. The complex conjugate term is applied automatically.
 
         Args:
-            name (str): The name of the coupling, must be unique.
             expr (str): An expression describing the stength of the coupling, must only use parameters that are in (or will be added to) the context manager.
             field1 (int): The origin field of the coupling.
             field2 (int): The target field of the coupling.
@@ -596,18 +551,27 @@ class FDSolver:
         mat_name = f"id_{field1}{field2}"
         imat_name = f"i_id_{field1}{field2}"
         self.add_coupling_matrix(mat_name, matrix, field1, field2)
-        self.add_coupling_matrix(mat_name, 1j * matrix, field1, field2)
+        self.add_coupling_matrix(imat_name, 1j * matrix, field1, field2)
 
         self.add_coupling(f"real({expr}) * {mat_name} + imag({expr}) * {imat_name}")
 
     def add_TETM(self, expr: str, field1: int, field2: int):
-        """Add a TETM splitting term between fields 1 and 2
+        """Add a TETM splitting term between fields 1 and 2. TE/TM splitting is a 2D vectorial-wave concept,
+        so this is only defined for 2D solvers.
 
         Args:
             expr (str): An expression describing the stength of the coupling, must only use parameters that are in (or will be added to) the context manager.
             field1 (int): The origin field of the coupling.
             field2 (int): The target field of the coupling.
+
+        Raises:
+            ValueError: If the solver is not 2D.
         """
+        if self.n_dims != 2:
+            raise ValueError(
+                "add_TETM is only defined for 2D solvers, as TE/TM splitting has no general nD analog"
+            )
+
         f1, f2 = field1, field2  # shorten names for expression length
 
         # adding the real and imaginary main diagonal
@@ -657,40 +621,14 @@ class FDSolver:
             xr.DataArray(np.arange(n_eigva), coords={"band": np.arange(n_eigva)})
         ]
 
-        all_coords = {}
-        for arr in eigva_coords:
-            for d in arr.dims:
-                # prefer coords over raw range
-                if d in arr.coords:
-                    coord = arr.coords[d]
-                else:
-                    coord = np.arange(arr.sizes[d])
-                # if already seen, ensure consistent
-                if d not in all_coords:
-                    all_coords[d] = coord
-
-        # 2. Compute the shape
-        shape = [
-            all_coords[d].sizes[d]
-            if isinstance(all_coords[d], xr.DataArray)
-            else len(all_coords[d])
-            for d in all_coords
-        ]
-
-        # 3. Create the zero-filled DataArray
-        eigva = np.zeros(shape)
-        eigva = xr.DataArray(
-            eigva, dims=list(all_coords.keys()), coords=all_coords, name="eigva"
-        )
-
-        return eigva
+        return empty_from_coords(eigva_coords, float, "eigva")
 
     def initialize_eigve(self, n_eigva: int, stack: bool = True) -> xr.DataArray:
         """Initialize the array containing the flattened eigenvectors
 
         Args:
             n_eigva (int): The number of eigenvalues to compute
-            stack (bool): Wheter to stack the eigenvectors along a single 'component' dimension. Somes children classes don't want that. default to True
+            stack (bool): Whether to stack the eigenvectors along a single 'component' dimension. Some children classes don't want that. default to True
         Returns:
             xr.DataArray: An empty DataArray with the proper shape.
         """
@@ -700,48 +638,22 @@ class FDSolver:
             xr.DataArray(np.arange(self.nb), coords={"field": np.arange(self.nb)})
         ]
 
-        eigve_coords += [self.a1_coord, self.a2_coord]
+        eigve_coords += self.a_coords
 
         eigve_coords += [
             xr.DataArray(np.arange(n_eigva), coords={"band": np.arange(n_eigva)})
         ]
 
-        all_coords = {}
-        for arr in eigve_coords:
-            for d in arr.dims:
-                # prefer coords over raw range
-                if d in arr.coords:
-                    coord = arr.coords[d]
-                else:
-                    coord = np.arange(arr.sizes[d])
-                # if already seen, ensure consistent
-                if d not in all_coords:
-                    all_coords[d] = coord
+        eigve = empty_from_coords(eigve_coords, complex, "eigve_flat")
 
-        # 2. Compute the shape
-        shape = [
-            all_coords[d].sizes[d]
-            if isinstance(all_coords[d], xr.DataArray)
-            else len(all_coords[d])
-            for d in all_coords
-        ]
-
-        # 3. Create the zero-filled DataArray
-        eigve = np.zeros(shape, dtype=complex)
-        eigve = xr.DataArray(
-            eigve, dims=list(all_coords.keys()), coords=all_coords, name="eigve_flat"
-        )
-
-        x = self.potentials[0].x
-        y = self.potentials[0].y
         eigve = eigve.assign_coords(
             {
-                "x": x,
-                "y": y,
+                self.potentials[0].coord_names[d]: self.potentials[0].coords[d]
+                for d in range(self.n_dims)
             }
         )
         if stack:
-            eigve = eigve.stack(component=("field", "a1", "a2")).transpose(
+            eigve = eigve.stack(component=("field", *self.spatial_dims)).transpose(
                 ..., "component", "band"
             )
         return eigve
@@ -787,14 +699,14 @@ class FDSolver:
         Args:
             potential_sel (dict): The parameters selection for the potential.
             alpha_sel (dict): The parameters selection for the kinetic factor.
-            reciprocal_sel (dict): The position is k-space.
+            reciprocal_sel (dict): The position in k-space.
             coupling_sel (dict): The parameters selection for the additional coupling terms.
 
         Returns:
             sps.spmatrix: The Hamiltonian.
         """
 
-        # Selecting only one value for each potential dimensions, the selection will be empty if there is no potential dimensions
+        # Selecting only one value for each potential dimension; the selection stays empty if there are no potential dimensions
 
         # The potential is a diagonal matrix, which we stored as a data array.
         potdiag = self.potential_data.sel(potential_sel).data
@@ -804,26 +716,19 @@ class FDSolver:
         alphas = self.make_alpha_list(alpha_sel)
         self.compute_full_operators(alphas)
 
-        if isinstance(self.kx, xr.DataArray):
-            kxsel = {
-                key: value
-                for key, value in reciprocal_sel.items()
-                if key in self.kx.dims
-            }
-            kx = float(self.kx.sel(kxsel).data)
-        else:
-            kx = self.kx
-
-        if isinstance(self.ky, xr.DataArray):
-            kysel = {
-                key: value
-                for key, value in reciprocal_sel.items()
-                if key in self.ky.dims
-            }
-            ky = float(self.ky.sel(kysel).data)
-        else:
-            ky = self.ky
-        kinetic_matrix = self.compute_kinetic([kx, ky])
+        # Resolve each k component: a fixed value, or selected from a swept coordinate
+        k = []
+        for ki in self.k:
+            if isinstance(ki, xr.DataArray):
+                ksel = {
+                    key: value
+                    for key, value in reciprocal_sel.items()
+                    if key in ki.dims
+                }
+                k += [float(ki.sel(ksel).data)]
+            else:
+                k += [ki]
+        kinetic_matrix = self.compute_kinetic(k)
 
         total_sel = {
             **potential_sel,
@@ -836,13 +741,16 @@ class FDSolver:
         )  # The initial Hamiltonian contains only the kinetic operator and the potential operator
 
         # --- Add the coupling terms to the Hamiltonian ---
-        self.coupling_context.update(total_sel)
+        # Overlay total_sel on a copy, so concurrent calls don't mutate shared solver state
+        eval_context = {**self.coupling_context, **total_sel}
         for coupling in self.couplings:
-            ham += eval(coupling, {"__builtins__": {}}, self.coupling_context)
+            ham += eval(coupling, {"__builtins__": {}}, eval_context)
 
         return ham
 
-    def normalize(self, eigve: Union[xr.DataArray, np.ndarray], norm:float = 1)-> xr.DataArray:
+    def normalize(
+        self, eigve: xr.DataArray | np.ndarray, norm: float = 1
+    ) -> xr.DataArray:
         """Normalize the eigenvector array to a specified value in real-space units.
 
         Args:
@@ -853,38 +761,42 @@ class FDSolver:
             xr.DataArray, np.ndarray
         """
         if isinstance(eigve, xr.DataArray):
-            
             if "field" in eigve.dims:
-                dims = ["a1", "a2", "field"]
+                dims = self.spatial_dims + ["field"]
             elif "component" in eigve.dims:
                 dims = ["component"]
             else:
-                dims = ["a1", "a2"]
-            
-            normed = eigve / (abs(eigve)**2).sum(dims)**0.5
-            
+                dims = self.spatial_dims
+
+            normed = eigve / (abs(eigve) ** 2).sum(dims) ** 0.5
+
         else:
-            normed = eigve / (np.abs(eigve)**2).sum()
-        
-        return normed * (norm / self.potentials[0].get_dS())**0.5
-        
-        
-        
+            normed = eigve / (np.abs(eigve) ** 2).sum()
+
+        return normed * (norm / self.potentials[0].get_dS()) ** 0.5
 
     def solve(
-        self, n_eigva: int, keep_vecs: bool = "True", parallel: bool = False, n_cores: int = -1, **kwargs
+        self,
+        n_eigva: int,
+        keep_vecs: bool = True,
+        parallel: bool = False,
+        n_cores: int = -1,
+        **kwargs,
     ) -> tuple[xr.DataArray, xr.DataArray]:
         """Solve the eigenvalue problem at every points of the parameter space, using the scipy.sparse.eigsh function.
 
         Args:
             n_eigva (int): The number of eigenvalues to compute.
-            parallel (bool, optional): Wheter to parallelize the solver with joblib. Default to False.
+            keep_vecs (bool, optional): Whether to also compute and return the eigenvectors. Default to True.
+            parallel (bool, optional): Whether to parallelize the solver with joblib. Default to False.
             n_cores (int, optional): The number of cores to use for the solver, set to -1 to use all cores available. default to -1.
         Returns:
-            tuple[xr.DataArray]: the eigenvalues and the eigenvectors if keep_vecs is True.
+            tuple[xr.DataArray, xr.DataArray] or xr.DataArray: the eigenvalues, and the eigenvectors if keep_vecs is True
+            (otherwise the eigenvalues alone).
 
         Additional kwargs:
-            phase0 (tuple[float,float,int]): The position at which to fix the phase of each eigenvector, in a1, a2, field basis. Default to (0, 0, 0).
+            phase0 (tuple[float,...,int]): The position at which to fix the phase of each eigenvector, in a1, a2, ..., field basis.
+            Defaults to (0, ..., 0) (the origin, field 0).
         """
 
         # Create empty DataArrays to store the eigenvalues and vectors
@@ -942,41 +854,55 @@ class FDSolver:
 
         # Initializing the progress bar
         potential_sels, reciprocal_sels, coupling_sels, alpha_sels = [], [], [], []
-        
+
         # Looping over everything
         for pots in potential_index:
             for alphs in alpha_index:
                 for recs in reciprocal_index:
                     for coups in coupling_index:
-                        # Selecting only one value for each potential dimensions, the selection will be empty if there is no potential dimensions
-                        potential_sels += [(
-                            dict(zip(potential_index.names, pots))
-                            if hasattr(potential_index, "names")
-                            else {}
-                        )]
-                        alpha_sels += [(
-                            dict(zip(alpha_index.names, alphs))
-                            if hasattr(alpha_index, "names")
-                            else {}
-                        )]
-                        reciprocal_sels += [(
-                            dict(zip(reciprocal_index.names, recs))
-                            if hasattr(reciprocal_index, "names")
-                            else {}
-                        )]
-                        coupling_sels += [(
-                            dict(zip(coupling_index.names, coups))
-                            if hasattr(coupling_index, "names")
-                            else {}
-                        )]
-                        
-        sels = [{**p, **r, **c, **a} for p, r, c, a in zip(potential_sels, reciprocal_sels, coupling_sels, alpha_sels)]
+                        # Selecting only one value for each potential dimension; the selection stays empty if there are no potential dimensions
+                        potential_sels += [
+                            (
+                                dict(zip(potential_index.names, pots))
+                                if hasattr(potential_index, "names")
+                                else {}
+                            )
+                        ]
+                        alpha_sels += [
+                            (
+                                dict(zip(alpha_index.names, alphs))
+                                if hasattr(alpha_index, "names")
+                                else {}
+                            )
+                        ]
+                        reciprocal_sels += [
+                            (
+                                dict(zip(reciprocal_index.names, recs))
+                                if hasattr(reciprocal_index, "names")
+                                else {}
+                            )
+                        ]
+                        coupling_sels += [
+                            (
+                                dict(zip(coupling_index.names, coups))
+                                if hasattr(coupling_index, "names")
+                                else {}
+                            )
+                        ]
+
+        sels = [
+            {**p, **r, **c, **a}
+            for p, r, c, a in zip(
+                potential_sels, reciprocal_sels, coupling_sels, alpha_sels
+            )
+        ]
 
         e, X = eigsh(
             self.create_hamiltonian(
-                potential_sels[0], alpha_sels[0], reciprocal_sels[0], coupling_sels[0]), 
-            k=n_eigva, 
-            which="SA"
+                potential_sels[0], alpha_sels[0], reciprocal_sels[0], coupling_sels[0]
+            ),
+            k=n_eigva,
+            which="SA",
         )
 
         def x(pot_sel, alpha_sel, rec_sel, cou_sel):
@@ -986,12 +912,19 @@ class FDSolver:
         print(f"Performing {n_tot} diagonalizations...")
         if parallel:
             parallel = Parallel(n_jobs=min(n_cores, n_tot), return_as="list", verbose=5)
-            results = parallel(delayed(x)(p,a,r,c) for p, a, r, c in zip(potential_sels, alpha_sels, reciprocal_sels, coupling_sels))
+            results = parallel(
+                delayed(x)(p, a, r, c)
+                for p, a, r, c in zip(
+                    potential_sels, alpha_sels, reciprocal_sels, coupling_sels
+                )
+            )
         else:
             results = []
             with tqdm(total=n_tot) as pbar:
-                for p, a, r, c in zip(potential_sels, alpha_sels, reciprocal_sels, coupling_sels):
-                    results += [x(p,a,r,c)]
+                for p, a, r, c in zip(
+                    potential_sels, alpha_sels, reciprocal_sels, coupling_sels
+                ):
+                    results += [x(p, a, r, c)]
                     pbar.update(1)
 
         print("storing the results")
@@ -1028,18 +961,17 @@ class FDSolver:
         if keep_vecs:
             eigve = eigve.unstack(dim="component").rename("eigve")
 
-            pos0 = kwargs.get("phase0", (0, 0, 0))
-            sel0 = dict(a1=pos0[0], a2=pos0[1], field=pos0[2])
+            pos0 = kwargs.get("phase0", (0.01,) * self.n_dims + (0,))
+            sel0 = {self.spatial_dims[d]: pos0[d] for d in range(self.n_dims)}
+            sel0["field"] = pos0[self.n_dims]
 
             eigve = eigve * xr.ufuncs.exp(
                 -1j * xr.ufuncs.angle(eigve.sel(sel0, method="nearest"))
             )
-            xc = self.potentials[0].x
-            yc = self.potentials[0].y
             eigve = eigve.assign_coords(
                 {
-                    "x": xc,
-                    "y": yc,
+                    self.potentials[0].coord_names[d]: self.potentials[0].coords[d]
+                    for d in range(self.n_dims)
                 }
             )
 
@@ -1049,14 +981,12 @@ class FDSolver:
             return eigva.squeeze()
 
 
-
-
 if __name__ == "__main__":
-    
-    import matplotlib.pyplot as plt  # noqa: E402
-    import time as time # noqa: E402
+    import time as time
+
+    import matplotlib.pyplot as plt
     from plotting import plot_eigenvector
-    
+
     res = (200, 200)
 
     a = 2.5
@@ -1066,14 +996,12 @@ if __name__ == "__main__":
     # P = Potential([[3, -20], [3, 20]], resolution=res, v0=0)
     P = Potential([[10, 0], [0, 10]], resolution=res, v0=0)
     # P = Potential([a1,a2], resolution=res, v0=0)
-    P.V = (P.V.x**2 + P.V.y**2)
+    P.V = P.V.x**2 + P.V.y**2
 
     solv = FDSolver(P, 1)
-    
+
     eigva, eigve = solv.solve(1)
-    
-    plot_eigenvector([[abs(eigve)**2]], [[P]], [['amplitude']])
+
+    plot_eigenvector([[abs(eigve) ** 2]], [[P]], [["amplitude"]])
     plt.show()
-
-
-
+    
