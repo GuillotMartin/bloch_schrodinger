@@ -424,10 +424,6 @@ class Wannier:
     def initial_step(self) -> float:
         """The step length 1/(4.sum_b w_b) that Marzari and Vanderbilt derive for steepest descent.
 
-        It is the exact minimizer along the gradient for the diagonal part of the functional, so it is
-        a far better starting guess than an arbitrary constant, and the line search then only has to
-        correct for the rest.
-
         Returns:
             float
         """

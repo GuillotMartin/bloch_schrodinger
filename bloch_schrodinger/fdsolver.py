@@ -1005,3 +1005,4 @@ if __name__ == "__main__":
     plot_eigenvector([[abs(eigve) ** 2]], [[P]], [["amplitude"]])
     plt.show()
     
+

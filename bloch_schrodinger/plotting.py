@@ -52,6 +52,17 @@ def _to_orthogonal(
     )
 
 
+def _moving_dims(
+    data: xr.DataArray, name: str, spatial_dims: list[str]
+) -> list[str]:
+    """Return the non-spatial dims the cartesian coordinate 'name' depends on.
+
+    A field living on a moving grid -- the output of a rescaling solver, say -- carries cartesian
+    coordinates that are functions of the parameters, x(t, ...), rather than of the lattice alone.
+    An empty list means the grid is fixed and the coordinate can be read once and reused."""
+    return [d for d in data.coords[name].dims if d not in spatial_dims]
+
+
 def _make_sliders(
     data: xr.DataArray,
     slider_dims: list[str],
@@ -701,6 +712,7 @@ def create_map(
     data: xr.DataArray,
     method: str,
     template: dict = {},
+    cst_bds: bool = False,
 ) -> tuple[dict, Callable, Axes]:
     """A low-level function to handle the creation of interactive 2D plots
 
@@ -711,7 +723,9 @@ def create_map(
         If these aren't the data's own native a1,a2 axes (e.g. plotting x,z out of a 3D field, a flipped
         axis order, or a skewed lattice), the data is first interpolated onto an orthogonal cartesian grid;
         any spatial axis not selected then becomes an ordinary slider.
-        data (xr.DataArray): The data to plot.
+        data (xr.DataArray): The data to plot. Its cartesian coordinates may depend on the parameters
+        as well as on the lattice, as a rescaling solver's do; the grid then moves with the sliders and
+        is redrawn at each of their positions rather than interpolated onto a common one.
         method (str): Which matplotlib 2D plot function to use between 'pcolormesh', 'contour' and 'contourf'.
         template (dict, optional): The template dictionnary contains all the instruction to create the plot. It has the following nested structure:
             template
@@ -723,6 +737,10 @@ def create_map(
                     ↳ tickslabel: used to set manually the text of the colorbar ticks if necessary. Default to None.
                 ↳ slider_start: The initial position of the sliders. Default to 'left'.
                 ↳ autoscale: Wheter to autoscale the color range. Default to True.
+        cst_bds (bool, optional): Only meaningful on a moving grid. True keeps the axis limits fixed,
+        leaving the caller to set them (plot_eigenvector spans the largest frame); False makes them
+        follow the current frame, so the cloud keeps its apparent size while the axis labels change.
+        Defaults to False.
 
     Returns:
         tuple[dict, Callable, Axes]: A slider dictionnary, an update function for interactivity and the Axes object.
@@ -743,19 +761,46 @@ def create_map(
 
     spatial_dims = _spatial_dims(data)
     n_dims = len(spatial_dims)
-    ortho = cart_axes != [0, 1] or n_dims != 2
+    dim1, dim2 = coord_names[cart_axes[0]], coord_names[cart_axes[1]]
+
+    # A moving grid is drawn on its own lattice instead of being interpolated onto a common cartesian
+    # one, because there is no common one to speak of: it changes with the sliders. pcolormesh takes
+    # the 2D X,Y mesh directly, so this handles any axis order and any number of dims on its own, and
+    # it draws a skewed lattice as the skewed cells it really is rather than smoothing over them.
+    moving = bool(_moving_dims(data, dim1, spatial_dims))
+    ortho = not moving and (cart_axes != [0, 1] or n_dims != 2)
     if ortho:
         data = _to_orthogonal(data, spatial_dims)
 
-    dim1, dim2 = coord_names[cart_axes[0]], coord_names[cart_axes[1]]
-    plotted_dims = [dim1, dim2] if ortho else spatial_dims
-    leftover_spatial = (
-        [coord_names[d] for d in range(n_dims) if d not in cart_axes] if ortho else []
-    )
+    if moving:
+        # The slice through a leftover axis is a slice of constant lattice index, which is a plane of
+        # constant z only as long as the grid is axis-aligned -- as a rescaling solver's always is.
+        plotted_dims = [spatial_dims[d] for d in cart_axes]
+        leftover_spatial = [spatial_dims[d] for d in range(n_dims) if d not in cart_axes]
+    else:
+        plotted_dims = [dim1, dim2] if ortho else spatial_dims
+        leftover_spatial = (
+            [coord_names[d] for d in range(n_dims) if d not in cart_axes] if ortho else []
+        )
 
     # Creating the sliders objects
     slider_dims = [dim for dim in data.dims if dim not in plotted_dims]
     sliders = _make_sliders(data, slider_dims, leftover_spatial, template)
+
+    # X, Y and the field are all held in the data's own dim order, which keeps them consistent with
+    # each other whatever order 'cart_axes' asked for
+    mesh_dims = [d for d in data.dims if d in plotted_dims]
+
+    def mesh_at(sel: dict) -> tuple[xr.DataArray, xr.DataArray]:
+        """The cartesian mesh the field is drawn on, at one position of the sliders."""
+        out = []
+        for name in (dim1, dim2):
+            coord = data.coords[name]
+            coord = coord.sel(
+                {d: v for d, v in sel.items() if d in coord.dims}, method="nearest"
+            )
+            out += [coord.transpose(*mesh_dims) if moving else coord]
+        return out[0], out[1]
 
     # Creating the fkwargs key just in case, to avoid testing its existence every time
     if template.get("fkwargs") is None:
@@ -777,16 +822,20 @@ def create_map(
             )
 
     # Shortcut names for the coordinates
-    X = data.coords[dim1]
-    Y = data.coords[dim2]
+    X, Y = mesh_at(initial_field_sel)
 
     # Initial data selection
     plot_init = data.sel(initial_field_sel, method="nearest")
     if ortho:
         plot_init = plot_init.transpose(dim2, dim1)
+    elif moving:
+        plot_init = plot_init.transpose(*mesh_dims)
 
     obj = func(ax, X, Y, plot_init, **template["fkwargs"])
-
+    if moving and not cst_bds:
+        ax.set_xlim(float(X.min()), float(X.max()))
+        ax.set_ylim(float(Y.min()), float(Y.max()))
+    
     if template.get("clim"):
         obj.set_clim(template["clim"][0], template["clim"][1])
 
@@ -795,6 +844,7 @@ def create_map(
         if colorbar.get("kwargs") is None:
             colorbar["kwargs"] = {"format": "{x:.1e}"}
 
+    cbar = None
     if colorbar:
         divider = make_axes_locatable(ax)
         if colorbar.get("cax") is None:
@@ -820,15 +870,28 @@ def create_map(
         new_plot = data.sel(field_sel, method="nearest")
         if ortho:
             new_plot = new_plot.transpose(dim2, dim1)
+        elif moving:
+            new_plot = new_plot.transpose(*mesh_dims)
 
-        if method in ["contour", "contourf"]:
+        # On a moving grid the mesh itself has to be rebuilt, so the artist cannot be updated in
+        # place even for a pcolormesh: its geometry, not just its values, is what changed.
+        newX, newY = mesh_at(sel) if moving else (X, Y)
+        if moving or method in ["contour", "contourf"]:
             if hasattr(obj, "collections"):
                 for coll in obj.collections:
                     coll.remove()
             else:
                 obj.remove()
 
-            obj = func(ax, X, Y, new_plot, **template["fkwargs"])
+            obj = func(ax, newX, newY, new_plot, **template["fkwargs"])
+            # The artist the colorbar and the color limits were attached to no longer exists
+            if template.get("clim"):
+                obj.set_clim(template["clim"][0], template["clim"][1])
+            # if cbar is not None:
+            #     cbar.update_normal(obj)
+            if moving and not cst_bds:
+                ax.set_xlim(float(newX.min()), float(newX.max()))
+                ax.set_ylim(float(newY.min()), float(newY.max()))
         else:
             obj.set(array=new_plot.data.reshape(-1))
 
@@ -846,6 +909,7 @@ def create_line(
     cart_axis: int,
     data: xr.DataArray,
     template: dict = {},
+    cst_bds: bool = False,
 ) -> tuple[dict, Callable, Axes]:
     """A low-level function to handle the creation of interactive 1D line plots, the spatial analog of
     create_map for a single cartesian axis.
@@ -854,26 +918,46 @@ def create_line(
         fig (Figure): The figure to plot the line in.
         ax (Axes): The ax to plot the line in.
         cart_axis (int): The cartesian axis to plot against, with 0 = "x", 1 = "y" and 2 = "z".
-        data (xr.DataArray): The data to plot.
+        data (xr.DataArray): The data to plot. As in create_map, its cartesian coordinate may depend on
+        the parameters, in which case the abscissa moves with the sliders.
         template (dict, optional): Only 'fkwargs' (passed to ax.plot), 'slider_start' and 'autoscale' are used.
+        cst_bds (bool, optional): Only meaningful on a moving grid. False makes the x limits follow the
+        current frame. Defaults to False.
 
     Returns:
         tuple[dict, Callable, Axes]: A slider dictionnary, an update function for interactivity and the Axes object.
     """
     spatial_dims = _spatial_dims(data)
     n_dims = len(spatial_dims)
-    ortho = n_dims != 1
+    dim1 = coord_names[cart_axis]
+
+    moving = bool(_moving_dims(data, dim1, spatial_dims))
+    ortho = not moving and n_dims != 1
     if ortho:
         data = _to_orthogonal(data, spatial_dims)
 
-    dim1 = coord_names[cart_axis]
-    plotted_dims = [dim1] if ortho else spatial_dims
-    leftover_spatial = (
-        [coord_names[d] for d in range(n_dims) if d != cart_axis] if ortho else []
-    )
+    if moving:
+        plotted_dims = [spatial_dims[cart_axis]]
+        leftover_spatial = [
+            spatial_dims[d] for d in range(n_dims) if d != cart_axis
+        ]
+    else:
+        plotted_dims = [dim1] if ortho else spatial_dims
+        leftover_spatial = (
+            [coord_names[d] for d in range(n_dims) if d != cart_axis] if ortho else []
+        )
 
     slider_dims = [dim for dim in data.dims if dim not in plotted_dims]
     sliders = _make_sliders(data, slider_dims, leftover_spatial, template)
+
+    def abscissa_at(sel: dict) -> xr.DataArray:
+        """The cartesian abscissa the line is drawn against, at one position of the sliders."""
+        coord = data.coords[dim1]
+        if not moving:
+            return coord
+        return coord.sel(
+            {d: v for d, v in sel.items() if d in coord.dims}, method="nearest"
+        ).transpose(*plotted_dims)
 
     template = deepcopy(template)
     if template.get("fkwargs") is None:
@@ -881,15 +965,26 @@ def create_line(
 
     initial_field_sel = {dim: sliders[dim].value for dim in sliders}
 
-    X = data.coords[dim1]
+    X = abscissa_at(initial_field_sel)
     plot_init = data.sel(initial_field_sel, method="nearest")
+    if moving:
+        plot_init = plot_init.transpose(*plotted_dims)
 
     (line,) = ax.plot(X, plot_init, **template["fkwargs"])
+    if moving and not cst_bds:
+        ax.set_xlim(float(X.min()), float(X.max()))
 
     def update(**kwargs):
         sel = {dim: kwargs[dim] for dim in sliders}
         new_plot = data.sel(sel, method="nearest")
-        line.set_ydata(new_plot.data)
+        if moving:
+            # The abscissa moves too, so both halves of the line have to be handed over
+            newX = abscissa_at(sel)
+            line.set_data(newX.data, new_plot.transpose(*plotted_dims).data)
+            if not cst_bds:
+                ax.set_xlim(float(newX.min()), float(newX.max()))
+        else:
+            line.set_ydata(new_plot.data)
 
         if template.get("autoscale", True):
             pad = max(1e-3, float((new_plot.max() - new_plot.min()) * 0.05))
@@ -940,20 +1035,39 @@ def create_quiver(
 
     spatial_dims = _spatial_dims(dataU)
     n_dims = len(spatial_dims)
-    ortho = cart_axes != [0, 1] or n_dims != 2
+    dim1, dim2 = coord_names[cart_axes[0]], coord_names[cart_axes[1]]
+
+    moving = bool(_moving_dims(dataU, dim1, spatial_dims))
+    ortho = not moving and (cart_axes != [0, 1] or n_dims != 2)
     if ortho:
         dataU = _to_orthogonal(dataU, spatial_dims)
         dataV = _to_orthogonal(dataV, spatial_dims)
 
-    dim1, dim2 = coord_names[cart_axes[0]], coord_names[cart_axes[1]]
-    plotted_dims = [dim1, dim2] if ortho else spatial_dims
-    leftover_spatial = (
-        [coord_names[d] for d in range(n_dims) if d not in cart_axes] if ortho else []
-    )
+    if moving:
+        plotted_dims = [spatial_dims[d] for d in cart_axes]
+        leftover_spatial = [spatial_dims[d] for d in range(n_dims) if d not in cart_axes]
+    else:
+        plotted_dims = [dim1, dim2] if ortho else spatial_dims
+        leftover_spatial = (
+            [coord_names[d] for d in range(n_dims) if d not in cart_axes] if ortho else []
+        )
 
     # Creating the sliders objects
     slider_dims = [dim for dim in dataU.dims if dim not in plotted_dims]
     sliders = _make_sliders(dataU, slider_dims, leftover_spatial, template)
+
+    mesh_dims = [d for d in dataU.dims if d in plotted_dims]
+
+    def mesh_at(sel: dict) -> tuple[xr.DataArray, xr.DataArray]:
+        """The arrow positions, at one position of the sliders."""
+        out = []
+        for name in (dim1, dim2):
+            coord = dataU.coords[name]
+            coord = coord.sel(
+                {d: v for d, v in sel.items() if d in coord.dims}, method="nearest"
+            )
+            out += [coord.transpose(*mesh_dims) if moving else coord]
+        return out[0], out[1]
 
     # Creating the fkwargs key just in case, to avoid testing its existence every time
     if template.get("fkwargs") is None:
@@ -972,8 +1086,7 @@ def create_quiver(
             )
 
     # Shortcut names for the coordinates
-    X = dataU.coords[dim1]
-    Y = dataU.coords[dim2]
+    X, Y = mesh_at(initial_field_sel)
 
     def subsample(arr):
         return arr.isel({d: slice(None, None, n) for d in arr.dims})
@@ -984,6 +1097,9 @@ def create_quiver(
     if ortho:
         plot_init_U = plot_init_U.transpose(dim2, dim1)
         plot_init_V = plot_init_V.transpose(dim2, dim1)
+    elif moving:
+        plot_init_U = plot_init_U.transpose(*mesh_dims)
+        plot_init_V = plot_init_V.transpose(*mesh_dims)
 
     obj = func(
         ax,
@@ -1026,6 +1142,12 @@ def create_quiver(
         if ortho:
             new_plot_U = new_plot_U.transpose(dim2, dim1)
             new_plot_V = new_plot_V.transpose(dim2, dim1)
+        elif moving:
+            new_plot_U = new_plot_U.transpose(*mesh_dims)
+            new_plot_V = new_plot_V.transpose(*mesh_dims)
+
+        # On a moving grid the arrows sit at new positions as well as carrying new values
+        newX, newY = mesh_at(sel) if moving else (X, Y)
 
         if hasattr(obj, "collections"):
             for coll in obj.collections:
@@ -1035,8 +1157,8 @@ def create_quiver(
 
         obj = func(
             ax,
-            subsample(X),
-            subsample(Y),
+            subsample(newX),
+            subsample(newY),
             subsample(new_plot_U),
             subsample(new_plot_V),
             **template["fkwargs"],
@@ -1129,6 +1251,7 @@ def plot_isosurface(
     colorscale: str | colors.Colormap | NoneType = None,
     crange: tuple[float, float] | NoneType = None,
     resolution: int = None,
+    cst_bds: bool = True,
     layout: dict = {},
 ) -> go.FigureWidget:
     """Render a 3D mode as an interactive plotly isosurface, with the surface's shape and its color
@@ -1138,12 +1261,16 @@ def plot_isosurface(
 
     Args:
         volume (xr.DataArray): The real field whose level set is drawn, must have exactly 3 spatial
-        dims (a1, a2, a3). Pass e.g. np.abs(eigve) for a complex eigenvector.
+        dims (a1, a2, a3). Pass e.g. np.abs(eigve) for a complex eigenvector. Its cartesian coordinates
+        may move with the parameters, as a rescaling solver's do, in which case each frame is regridded
+        onto its own bounding box as the sliders reach it.
         color (xr.DataArray, optional): The real field painted onto the surface, e.g. np.angle(eigve).
         It is interpolated at the surface's vertices, so it needs neither the same resolution nor the
         same lattice as 'volume'. If None, the surface is colored by 'volume' itself. Defaults to None.
         potential (Potential, optional): If given, one of its equipotentials is drawn as a translucent
-        gray shell for context, with its own level slider. Defaults to None.
+        gray shell for context, with its own level slider. It keeps its own fixed grid even when the
+        volume's moves, which is the right picture: a trap sits still in the laboratory frame while the
+        cloud's frame expands around it. Defaults to None.
         isovalue (float, optional): The initial level, as a fraction of the selected mode's own range
         rather than an absolute value, so that a surface stays visible when switching between modes of
         very different amplitudes. Defaults to 0.5.
@@ -1163,6 +1290,9 @@ def plot_isosurface(
         resolution (int, optional): The resolution of the cartesian grid the fields are interpolated onto
         before the surface is extracted, which sets how fine the mesh is. If None, the fields' own
         resolution is used. Defaults to None.
+        cst_bds (bool, optional): Only bites on a moving grid. True pins the scene to the largest frame
+        the run reaches, so that the surface is seen to grow; False leaves plotly to rescale the box
+        around each frame, which keeps the surface the same apparent size. Defaults to True.
         layout (dict, optional): Extra keyword arguments passed to the figure's update_layout. Defaults to {}.
 
     Returns:
@@ -1224,22 +1354,36 @@ def plot_isosurface(
         # vertices are sampled; _isosurface_mesh turns the angle back into a value at the very end.
         color = np.exp(2j * np.pi * color / period)
 
-    volume = _to_orthogonal(volume, spatial_dims, resolution)
-    color = (
-        volume
-        if color is None
-        else _to_orthogonal(color, _spatial_dims(color), resolution)
-    )
+    def cart_grid(field: xr.DataArray) -> tuple[tuple, tuple]:
+        """The spacing and origin marching cubes needs, read off an already-orthogonal field."""
+        Xc, Yc, Zc = field.x.values, field.y.values, field.z.values
+        return (
+            (Xc[1] - Xc[0], Yc[1] - Yc[0], Zc[1] - Zc[0]),
+            (Xc[0], Yc[0], Zc[0]),
+        )
+
+    # On a moving grid there is no single cartesian grid to interpolate onto: each frame has its own,
+    # and that is the whole point, since the surface has to be seen to grow with it. So the regrid is
+    # deferred into 'frame' below and redone whenever the sliders land somewhere new.
+    moving = bool(_moving_dims(volume, "x", spatial_dims))
+
+    if moving:
+        color = volume if color is None else color
+    else:
+        volume = _to_orthogonal(volume, spatial_dims, resolution)
+        color = (
+            volume
+            if color is None
+            else _to_orthogonal(color, _spatial_dims(color), resolution)
+        )
+        # The surface is extracted on the volume's grid, while the color field is only ever sampled at
+        # the resulting vertices, so only the former's spacing matters here
+        spacing, origin = cart_grid(volume)
+
     if crange is None:  # the surface is colored by the volume field itself
         crange = (float(color.min()), float(color.max()))
 
-    # The surface is extracted on the volume's grid, while the color field is only ever sampled at
-    # the resulting vertices, so only the former's spacing matters here
-    Xc, Yc, Zc = volume.x.values, volume.y.values, volume.z.values
-    spacing = (Xc[1] - Xc[0], Yc[1] - Yc[0], Zc[1] - Zc[0])
-    origin = (Xc[0], Yc[0], Zc[0])
-
-    spatial = ("x", "y", "z")
+    spatial = tuple(spatial_dims) if moving else ("x", "y", "z")
     sliders = create_sliders_from_dims(
         {d: volume.coords[d] for d in volume.dims if d not in spatial}
     )
@@ -1262,15 +1406,41 @@ def plot_isosurface(
         sel = {d: kwargs[d] for d in field.dims if d in kwargs}
         return field.sel(sel, method="nearest") if sel else field
 
+    # Regridding a moving frame costs a full 3D interpolation, and 'update' fires on every control
+    # including the isovalue, which does not move the grid at all. Holding the last few frames means
+    # that sweeping the isovalue, or scrubbing back over a frame already seen, costs nothing. The
+    # cache is kept small because each entry is a whole volume.
+    frames: dict[tuple, tuple] = {}
+
+    def frame(kwargs: dict) -> tuple[xr.DataArray, xr.DataArray, tuple, tuple]:
+        """The volume and color fields on the current frame's own cartesian grid, with its geometry."""
+        key = tuple(kwargs.get(d) for d in sliders)
+        if key not in frames:
+            if len(frames) >= 4:
+                frames.pop(next(iter(frames)))
+            vol = _to_orthogonal(select(volume, kwargs), spatial_dims, resolution)
+            col = (
+                vol
+                if color is volume
+                else _to_orthogonal(
+                    select(color, kwargs), _spatial_dims(color), resolution
+                )
+            )
+            frames[key] = (vol, col, *cart_grid(vol))
+        return frames[key]
+
     def build(kwargs: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        field = select(volume, kwargs)
+        if moving:
+            field, col, sp, org = frame(kwargs)
+        else:
+            field, col, sp, org = select(volume, kwargs), select(color, kwargs), spacing, origin
         lo, hi = float(field.min()), float(field.max())
         return _isosurface_mesh(
             field,
-            select(color, kwargs),
+            col,
             lo + kwargs["isovalue"] * (hi - lo),
-            spacing,
-            origin,
+            sp,
+            org,
             period,
         )
 
@@ -1329,8 +1499,10 @@ def plot_isosurface(
             create_sliders_from_dims(
                 {
                     d: pot.coords[d]
+                    # The shell is interpolated up front whatever the volume does, so its own spatial
+                    # dims are x,y,z here even when 'spatial' is the volume's moving lattice
                     for d in pot.dims
-                    if d not in spatial and d not in sliders
+                    if d not in ("x", "y", "z") and d not in sliders
                 }
             )
         )
@@ -1388,14 +1560,23 @@ def plot_isosurface(
             )
         )
 
+    scene = dict(
+        xaxis_title="x",
+        yaxis_title="y",
+        zaxis_title="z",
+        # Without this the box is stretched to a cube and the lattice's proportions are lost
+        aspectmode="data",
+    )
+    if moving and cst_bds:
+        # Left to itself plotly refits the box around each frame, so a surface that doubles in size
+        # looks unchanged. The coordinates span every frame the run went through, so their extremes
+        # are the largest one: pinning the scene there is what makes the growth visible.
+        for name in ("x", "y", "z"):
+            coord = volume.coords[name]
+            scene[f"{name}axis_range"] = [float(coord.min()), float(coord.max())]
+
     fig.update_layout(
-        scene=dict(
-            xaxis_title="x",
-            yaxis_title="y",
-            zaxis_title="z",
-            # Without this the box is stretched to a cube and the lattice's proportions are lost
-            aspectmode="data",
-        ),
+        scene=scene,
         margin=dict(l=0, r=0, t=0, b=0),
         **layout,
     )
@@ -1433,6 +1614,7 @@ def plot_eigenvector(
     quivers: NoneType | list[list[NoneType | tuple[xr.DataArray]]] = None,
     ncontours: int = 3,
     cart_axes: list[int] | list[list[list[int]]] = [0, 1],
+    cst_bds: bool = False,
 ) -> tuple[Figure, list[Axes]]:
     """The main function to plot eigenvectors in a interactive manner.
 
@@ -1452,6 +1634,10 @@ def plot_eigenvector(
         subplot its own axes list independently. A single axis gives line plots (potential and eigenvector overlaid, styled with
         simple defaults rather than the template system); two axes give the usual pcolormesh/contour/quiver overlay. Any spatial
         axis not selected becomes an extra slider. Defaults to [0, 1].
+        cst_bds (bool, optional): Only useful on a field whose cartesian coordinates move with the parameters,
+        as a rescaling solver's do. True holds the axes at the largest frame the run ever reaches, so that
+        the cloud is seen to grow; False lets them follow the current frame, so the cloud keeps its apparent
+        size and it is the axis labels that change. Defaults to False.
 
     Raises:
         ValueError: Raise errors if the shapes are not consistent, or if quivers are given for a subplot with a single cart_axis.
@@ -1539,7 +1725,9 @@ def plot_eigenvector(
 
             if len(cart_axe) == 1:
                 if plot is not None:
-                    slids, up, ax = create_line(fig, ax, cart_axe[0], plot)
+                    slids, up, ax = create_line(
+                        fig, ax, cart_axe[0], plot, template[0], cst_bds
+                    )
                     sliders.update(slids)
                     funcs += [up]
                 if poten is not None:
@@ -1557,6 +1745,7 @@ def plot_eigenvector(
                                 "linewidth": 1,
                             }
                         },
+                        cst_bds,
                     )
                     ax_pot.set_ylabel("Potential", color="gray")
                     ax_pot.tick_params(axis="y", colors="gray")
@@ -1565,13 +1754,13 @@ def plot_eigenvector(
             else:
                 if plot is not None:
                     slids, up, ax = create_map(
-                        fig, ax, cart_axe, plot, "pcolormesh", template[0]
+                        fig, ax, cart_axe, plot, "pcolormesh", template[0], cst_bds
                     )
                     sliders.update(slids)
                     funcs += [up]
                 if poten is not None:
                     slids, up, ax = create_map(
-                        fig, ax, cart_axe, poten.V, "contour", template[1]
+                        fig, ax, cart_axe, poten.V, "contour", template[1], cst_bds
                     )
                     sliders.update(slids)
                     funcs += [up]
@@ -1585,7 +1774,15 @@ def plot_eigenvector(
             bounds = (
                 plot if plot is not None else (poten.V if poten is not None else None)
             )
-            if bounds is not None:
+            # On a moving grid the coordinate spans every frame the run went through, so its extremes
+            # are the largest frame -- which is the box to hold the axes at when cst_bds is set. When
+            # it is not, the create_* update functions reset the limits frame by frame instead. A grid
+            # that does not move has one box either way, so cst_bds does not enter into it.
+            follows_frame = bounds is not None and cst_bds and bool(
+                _moving_dims(bounds, coord_names[cart_axe[0]], _spatial_dims(bounds))
+            )
+            
+            if bounds is not None and follows_frame:
                 co1 = coord_names[cart_axe[0]]
                 ax.set_xlim(np.min(bounds.coords[co1]), np.max(bounds.coords[co1]))
                 if len(cart_axe) == 2:
@@ -1626,7 +1823,8 @@ if __name__ == "__main__":
     plot_eigenvector(
         [[abs(eigve) ** 2, eigve.real]],
         [[foo, foo]],
-        [[("amplitude", conttmpl), "real"]],
+        [[("amplitude", conttmpl), ({"fkwargs":{"color":"k"}})]],
         cart_axes=[[[0, 1], [0]]],
     )
     plt.show()
+

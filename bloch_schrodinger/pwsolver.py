@@ -111,7 +111,7 @@ class PWSolver:
         self.b = 2 * np.pi * inv(self.a).T
 
     def compute_fV(self):
-        """Compute the fourier transform of the potential matrix"""
+        """Compute the Fourier transform of the potential matrix"""
 
         # Plane wave index along each axis, centered on zero the same way fftshift centers the transform
         self.pwka = [
