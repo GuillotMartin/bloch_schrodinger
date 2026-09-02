@@ -136,16 +136,24 @@ class Potential:
         self.V = self.V.assign_coords(
             {self.coord_names[i]: self.coords[i] for i in range(self.n_dims)}
         )
-
+        self._add_aliases()
         # Definitions for retrocompatibility
         if self.n_dims == 2:
             self.da1 = self.da[0]
             self.da2 = self.da[1]
             self.a1 = self.a[0]
             self.a2 = self.a[1]
-            self.x = self.coords[0]
-            self.y = self.coords[1]
 
+    def _add_aliases(self):
+        """Add "x", "y", "z" aliases for the cartesian coordinates.
+        """
+        self.x = self.coords[0]
+        if self.n_dims>=2:
+            self.y = self.coords[1]
+        if self.n_dims>=3:
+            self.z = self.coords[2]
+        
+    
     def clear(self):
         """Remove all parameter dimensions and features from the potential"""
         V = np.ones(self.resolution, dtype=self.dtype)
@@ -189,15 +197,13 @@ class Potential:
         self.V = self.V.assign_coords(
             {self.coord_names[i]: self.coords[i] for i in range(self.n_dims)}
         )
-
+        self._add_aliases()
         # Definitions for retrocompatibility
         if self.n_dims == 2:
             self.da1 = self.da[0]
             self.da2 = self.da[1]
             self.a1 = self.a[0]
             self.a2 = self.a[1]
-            self.x = self.coords[0]
-            self.y = self.coords[1]
 
     def __repr__(self) -> str:
         shape = {dim: len(self.V.coords[dim].data) for dim in self.V.dims}
@@ -431,7 +437,11 @@ class Potential:
         self.V = self._where_mask(r < 1, method, inverse, value)
 
     def plot(
-        self, cart_axes: list[int] = [0, 1], get_cbar=False, **kwargs
+        self, 
+        cart_axes: list[int] = [0, 1], 
+        get_cbar:bool = False, 
+        resolution:int|tuple[int] = None,
+        **kwargs
     ) -> tuple[Figure, Axes] | tuple[Figure, Axes, Axes]:
         """Creates an interactive plot of the potential, with all the parameters as sliders.
         Must be used in an interactive python session, preferably. kwargs are passed to the
@@ -451,7 +461,10 @@ class Potential:
         if ortho:
             # Interpolate potential on a cartesian grid
             inv_coords = create_cart_grid(
-                Vtmp, a=self.a, resolution=max(self.resolution), endpoint=self.endpoint
+                Vtmp, 
+                a=self.a, 
+                resolution=max(self.resolution) if resolution is None else resolution, 
+                endpoint=self.endpoint
             )
             mapping = {f"a{i + 1}": inv_coords[i] for i in range(self.n_dims)}
             Vtmp = (
@@ -637,9 +650,8 @@ class Potential:
             cpot.da2 = cpot.da[1]
             cpot.a1 = cpot.a[0]
             cpot.a2 = cpot.a[1]
-            cpot.x = cpot.coords[0]
-            cpot.y = cpot.coords[1]
 
+        cpot._add_aliases()
         return cpot
 
     def tile(self, bounds: tuple[tuple[int, int]]) -> "Potential":
@@ -714,14 +726,12 @@ class Potential:
 
         tiled.V = new_V
         tiled.coords = [ncoords[i] for i in range(self.n_dims)]
-
+        tiled._add_aliases()
         if self.n_dims == 2:
             tiled.da1 = ls[0] / n_tots[0]
             tiled.da2 = ls[1] / n_tots[1]
             tiled.a1 = tiled.a[0]
             tiled.a2 = tiled.a[1]
-            tiled.x = tiled.coords[0]
-            tiled.y = tiled.coords[1]
 
         return tiled
 

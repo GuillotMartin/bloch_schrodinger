@@ -36,7 +36,7 @@ def _spatial_dims(data: xr.DataArray) -> list[str]:
 
 
 def _to_orthogonal(
-    data: xr.DataArray, spatial_dims: list[str], resolution: int = None
+    data: xr.DataArray, spatial_dims: list[str], resolution: int|tuple[int] = None
 ) -> xr.DataArray:
     """Interpolate data onto an orthogonal cartesian grid, replacing its a1,a2,... dims with x,y,z.
     Used whenever the axes to plot against aren't the array's own native a1,a2 axes."""
@@ -711,6 +711,7 @@ def create_map(
     cart_axes: list[int],
     data: xr.DataArray,
     method: str,
+    resolution:int|tuple[int] = None,
     template: dict = {},
     cst_bds: bool = False,
 ) -> tuple[dict, Callable, Axes]:
@@ -770,7 +771,7 @@ def create_map(
     moving = bool(_moving_dims(data, dim1, spatial_dims))
     ortho = not moving and (cart_axes != [0, 1] or n_dims != 2)
     if ortho:
-        data = _to_orthogonal(data, spatial_dims)
+        data = _to_orthogonal(data, spatial_dims, resolution)
 
     if moving:
         # The slice through a leftover axis is a slice of constant lattice index, which is a plane of
@@ -910,6 +911,7 @@ def create_line(
     data: xr.DataArray,
     template: dict = {},
     cst_bds: bool = False,
+    resolution:int|tuple[int] = None,
 ) -> tuple[dict, Callable, Axes]:
     """A low-level function to handle the creation of interactive 1D line plots, the spatial analog of
     create_map for a single cartesian axis.
@@ -934,7 +936,7 @@ def create_line(
     moving = bool(_moving_dims(data, dim1, spatial_dims))
     ortho = not moving and n_dims != 1
     if ortho:
-        data = _to_orthogonal(data, spatial_dims)
+        data = _to_orthogonal(data, spatial_dims, resolution)
 
     if moving:
         plotted_dims = [spatial_dims[cart_axis]]
@@ -1250,7 +1252,7 @@ def plot_isosurface(
     cyclic: bool | float = False,
     colorscale: str | colors.Colormap | NoneType = None,
     crange: tuple[float, float] | NoneType = None,
-    resolution: int = None,
+    resolution: int|tuple[int] = None,
     cst_bds: bool = True,
     layout: dict = {},
 ) -> go.FigureWidget:
@@ -1264,16 +1266,20 @@ def plot_isosurface(
         dims (a1, a2, a3). Pass e.g. np.abs(eigve) for a complex eigenvector. Its cartesian coordinates
         may move with the parameters, as a rescaling solver's do, in which case each frame is regridded
         onto its own bounding box as the sliders reach it.
+        
         color (xr.DataArray, optional): The real field painted onto the surface, e.g. np.angle(eigve).
         It is interpolated at the surface's vertices, so it needs neither the same resolution nor the
         same lattice as 'volume'. If None, the surface is colored by 'volume' itself. Defaults to None.
+        
         potential (Potential, optional): If given, one of its equipotentials is drawn as a translucent
         gray shell for context, with its own level slider. It keeps its own fixed grid even when the
         volume's moves, which is the right picture: a trap sits still in the laboratory frame while the
         cloud's frame expands around it. Defaults to None.
+        
         isovalue (float, optional): The initial level, as a fraction of the selected mode's own range
         rather than an absolute value, so that a surface stays visible when switching between modes of
         very different amplitudes. Defaults to 0.5.
+        
         cyclic (Union[bool, float], optional): Set this when 'color' wraps around, as a phase does.
         True means a period of 2.pi, a number gives the period explicitly. A wrapped field treated as
         an ordinary one tears along the seam where it jumps from one end of its range to the other,
@@ -1281,15 +1287,19 @@ def plot_isosurface(
         triangles bridging the seam. So the field is carried as a unit complex number through both
         interpolations, and the surface is then colored vertex by vertex here rather than by handing
         plotly a scale, which leaves the wrap seamless. Defaults to False.
+        
         colorscale (Union[str, Colormap], optional): Any matplotlib or cmcrameri colormap, converted to
         a plotly colorscale. Defaults to the cyclic cm.romaO when 'cyclic' is set, since a wrapped field
         needs a colormap whose two ends meet, and to cm.oslo_r otherwise.
+        
         crange (tuple[float, float], optional): The color limits. If None, they are taken from the whole
         'color' array, so they stay fixed as the sliders move, or from one full period when 'cyclic' is
         set. Defaults to None.
+        
         resolution (int, optional): The resolution of the cartesian grid the fields are interpolated onto
         before the surface is extracted, which sets how fine the mesh is. If None, the fields' own
         resolution is used. Defaults to None.
+        
         cst_bds (bool, optional): Only bites on a moving grid. True pins the scene to the largest frame
         the run reaches, so that the surface is seen to grow; False leaves plotly to rescale the box
         around each frame, which keeps the surface the same apparent size. Defaults to True.
@@ -1610,10 +1620,11 @@ def plot_isosurface(
 def plot_eigenvector(
     plots: list[list[xr.DataArray | NoneType]],
     potentials: list[list[Potential | NoneType]],
-    templates: [list[list[str | tuple[str | dict | NoneType]]] | NoneType] = None,
+    templates: list[list[str | tuple[str | dict | NoneType]]] | NoneType = None,
     quivers: NoneType | list[list[NoneType | tuple[xr.DataArray]]] = None,
     ncontours: int = 3,
     cart_axes: list[int] | list[list[list[int]]] = [0, 1],
+    resolutions: list[list[int|tuple[int]|NoneType]] = None,
     cst_bds: bool = False,
 ) -> tuple[Figure, list[Axes]]:
     """The main function to plot eigenvectors in a interactive manner.
@@ -1647,6 +1658,8 @@ def plot_eigenvector(
 
     if templates is None:
         templates = [[None] * n_cols for _ in range(n_rows)]
+    if resolutions is None:
+        resolutions = [[None] * n_cols for _ in range(n_rows)]
 
     if len(templates) != n_rows or len(potentials) != n_rows:
         raise ValueError("different shapes for plots and templates")
@@ -1717,6 +1730,7 @@ def plot_eigenvector(
             poten = potentials[i][j]
             quiv = quivers[i][j]
             cart_axe = cart_axes[i][j]
+            resolution = resolutions[i][j]
 
             if len(cart_axe) == 1 and quiv is not None:
                 raise ValueError(
@@ -1726,7 +1740,7 @@ def plot_eigenvector(
             if len(cart_axe) == 1:
                 if plot is not None:
                     slids, up, ax = create_line(
-                        fig, ax, cart_axe[0], plot, template[0], cst_bds
+                        fig, ax, cart_axe[0], plot, template[0], cst_bds, resolution
                     )
                     sliders.update(slids)
                     funcs += [up]
@@ -1746,6 +1760,7 @@ def plot_eigenvector(
                             }
                         },
                         cst_bds,
+                        resolution
                     )
                     ax_pot.set_ylabel("Potential", color="gray")
                     ax_pot.tick_params(axis="y", colors="gray")
@@ -1754,13 +1769,13 @@ def plot_eigenvector(
             else:
                 if plot is not None:
                     slids, up, ax = create_map(
-                        fig, ax, cart_axe, plot, "pcolormesh", template[0], cst_bds
+                        fig, ax, cart_axe, plot, "pcolormesh", resolution, template[0], cst_bds
                     )
                     sliders.update(slids)
                     funcs += [up]
                 if poten is not None:
                     slids, up, ax = create_map(
-                        fig, ax, cart_axe, poten.V, "contour", template[1], cst_bds
+                        fig, ax, cart_axe, poten.V, "contour", resolution, template[1], cst_bds
                     )
                     sliders.update(slids)
                     funcs += [up]

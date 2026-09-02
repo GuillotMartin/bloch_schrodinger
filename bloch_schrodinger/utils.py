@@ -294,7 +294,6 @@ def create_cart_grid(
                 tmp_resolution[i] = int(resolution * rng[i] / np.max(rng))
 
         resolution = tmp_resolution
-
     coords = []
     for i in range(n_dims):
         coo = np.linspace(mins[i], maxs[i], resolution[i], endpoint=endpoint)
