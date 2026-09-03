@@ -37,7 +37,9 @@ REQUIRED = [
     'scikit-image',
     'ipympl',
     'tqdm',
-    'joblib',
+    # 1.4 is the floor for Parallel(return_as="generator_unordered"), which the 'progress' module
+    # uses to advance a bar off task completions rather than off the ordered queue
+    'joblib>=1.4',
     'cmcrameri',
 ]
 

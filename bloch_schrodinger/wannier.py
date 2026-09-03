@@ -4,15 +4,14 @@ from typing import Union
 
 import numpy as np
 import xarray as xr
-from joblib import Parallel, delayed
 from numpy.linalg import inv, svd
 from numpy.random import uniform
 from scipy.linalg import expm, fractional_matrix_power
-from tqdm import tqdm
 from xarray_einstats.linalg import matmul
 
 from bloch_schrodinger.fdsolver import FDSolver
 from bloch_schrodinger.potential import Potential, create_parameter
+from bloch_schrodinger.progress import bar, parallel_map
 from bloch_schrodinger.pwsolver import PWSolver
 
 
@@ -377,11 +376,21 @@ class Wannier:
         
         return U_mnk0
                     
-    def compute_bloch(self, **kwargs)->xr.DataArray:
+    def compute_bloch(
+        self,
+        parallel: bool = True,
+        n_cores: int = -1,
+        verbose: bool = True,
+        **kwargs,
+    )->xr.DataArray:
         """Compute the Bloch eigenvectors necessary to the determination of the MLWFs.
 
         Args:
-            n_wannier (_type_): The number of Wannier functions to compute.
+            parallel (bool, optional): Whether to parallelize the underlying Bloch solve. Passed
+            straight through, so that 'solve' can hand down what its own caller asked for rather
+            than fanning out regardless. Defaults to True.
+            n_cores (int, optional): Cores for that solve, -1 for all of them. Defaults to -1.
+            verbose (bool, optional): Whether that solve shows its progress bar. Defaults to True.
 
         Returns:
             xr.DataArray: The bloch eigenvectors
@@ -393,13 +402,17 @@ class Wannier:
             )
 
             solv.set_reciprocal_space(self.k)
-            eigva, eigve = solv.solve(self.n_wannier[1], parallel=True, n_cores = -1)
-            eigve = solv.compute_u(eigve)
+            eigva, eigve = solv.solve(
+                self.n_wannier[1], parallel=parallel, n_cores=n_cores, verbose=verbose
+            )
+            eigve = solv.compute_u(eigve, verbose=verbose)
         
         elif self.method == 'fd':
             solv = FDSolver(self.potential, self.alpha)
             solv.set_reciprocal_space(self.k)
-            eigva, eigve = solv.solve(self.n_wannier[1], parallel=True, n_cores = -1)
+            eigva, eigve = solv.solve(
+                self.n_wannier[1], parallel=parallel, n_cores=n_cores, verbose=verbose
+            )
 
         else:
             raise ValueError("Method must either be 'pw' or 'fd'")
@@ -555,7 +568,8 @@ class Wannier:
         tol = 1e-7,
         max_iter: int = 200,
         method: str = "cg",
-        seed: int | None = None)->xr.DataArray:
+        seed: int | None = None,
+        verbose: bool = True)->xr.DataArray:
         """Finds the proper unitary matrix U_mnk to compute the MLWFs at each point in parameter space.
 
         Args:
@@ -571,18 +585,23 @@ class Wannier:
             seed (int, optional): Seed for the random spreads of the initial gaussians. The minimization
             starts from a randomized guess, so without a seed two identical calls land on slightly
             different matrices; pass one to make a computation reproducible. Defaults to None.
+            verbose (bool, optional): Whether to plot progress bars, for the Bloch solve and for the
+            minimization. The end-of-run minimization summary is printed either way: it reports on the
+            quality of the result rather than on progress. Defaults to True.
 
         Returns:
             xr.DataArray: The unitary matrix U_mnk with additional parameter dimensions.
         """
-        print("Computing the Bloch functions...")
-        
+        if verbose:
+            print("Computing the Bloch functions...")
+
         if isinstance(n_wannier, int):
             self.n_wannier = [0,n_wannier]
-            self.compute_bloch(**blockwargs)
         else:
             self.n_wannier = n_wannier
-            self.compute_bloch(**blockwargs)
+        self.compute_bloch(
+            parallel=parallel, n_cores=n_cores, verbose=verbose, **blockwargs
+        )
         
         self.nbands = self.n_wannier[1]-self.n_wannier[0]
 
@@ -633,16 +652,27 @@ class Wannier:
                 x, centers, tol, max_iter=max_iter, method=method, rng=rng, return_info=True
             )
         
-        print(f"Computing {n_tot} sets of Wannier functions")
+        args = list(zip(selections, rngs))
+
         if parallel:
-            parallel = Parallel(n_jobs=min(n_cores, n_tot), return_as="list", verbose = 5)
-            results = parallel(delayed(f)(x, r) for x, r in zip(selections, rngs))
+            results = parallel_map(
+                f,
+                args,
+                n_jobs=min(n_cores, n_tot),
+                desc="Computing Wannier functions",
+                unit="set",
+                verbose=verbose,
+            )
         else:
-            results = []
-            with tqdm(total=n_tot) as pbar:
-                for x, r in zip(selections, rngs):
-                    results += [f(x, r)]
-                    pbar.update(1)
+            results = [
+                f(x, r)
+                for x, r in bar(
+                    args,
+                    desc="Computing Wannier functions",
+                    unit="set",
+                    verbose=verbose,
+                )
+            ]
 
         infos = [info for _, info in results]
         for i in range(n_tot):
@@ -664,6 +694,7 @@ class Wannier:
         U_mnk:xr.DataArray,
         bounds: list[tuple[int, int]],
         coarsen: tuple[int] | None = None,
+        verbose: bool = True,
         )->tuple[Potential, xr.DataArray]:
         """Compute the WFs profiles from a given unitary matrix.
 
@@ -674,6 +705,7 @@ class Wannier:
             coarsen (tuple[int], optional): Wheter to coarsen the resolution of the mode profile, one factor
             per axis. The factors must be dividers of the potential's resolution. See xarray coarsen function
             for more infos. Defaults to no coarsening.
+            verbose (bool, optional): Whether to plot a progress bar over the k-points. Defaults to True.
 
         Returns:
             tuple[Potential, xr.DataArray]: The extended potential for plotting/Hamiltonian computation as well as the MLWFs profiles.
@@ -755,7 +787,9 @@ class Wannier:
         ]
         reps = [1] * len(lead_dims) + n_cells
 
-        for ik in tqdm(k_indexes):
+        for ik in bar(
+            k_indexes, desc="Assembling Wannier functions", unit="k-point", verbose=verbose
+        ):
             lcK = {dim: ik[i] for i, dim in enumerate(self.kb_dims)}
             k_cart = [float(kc[ik]) for kc in k_grid]
 

@@ -12,5 +12,5 @@ scikit-image
 scipy
 ipympl
 tqdm
-joblib
+joblib>=1.4
 cmcrameri

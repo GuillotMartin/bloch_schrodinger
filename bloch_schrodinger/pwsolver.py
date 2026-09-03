@@ -2,14 +2,13 @@ import warnings
 
 import numpy as np
 import xarray as xr
-from joblib import Parallel, delayed
 from numpy.linalg import inv
 from scipy.fft import fftn, fftshift, ifftshift
 from scipy.linalg import eigh
 from scipy.sparse.linalg import eigsh
-from tqdm import tqdm, trange
 
 from bloch_schrodinger.potential import Potential
+from bloch_schrodinger.progress import bar, parallel_map
 from bloch_schrodinger.utils import empty_from_coords
 
 
@@ -484,48 +483,37 @@ class PWSolver:
             eigv *= np.exp(-1j*np.angle(eigv[self.nGs//2]))
             return e, eigv
 
-        if verbose: 
-            print(f"Performing {n_tot} diagonalizations, expanding on {self.nGs} plane waves...")
-            
+        args = list(zip(pot_sels, rec_sels))
+        # The basis size used to be announced in a banner above the bar; it rides in the label
+        # instead, where it stays attached to the bar it describes.
+        desc = f"Diagonalizing ({self.nGs} plane waves)"
+
         if parallel:
-            parallel = Parallel(n_jobs=min(n_cores, n_tot), return_as="list", verbose = 5 if verbose else 0)
-            results = parallel(delayed(x)(y, z) for y, z in zip(pot_sels, rec_sels))
+            results = parallel_map(
+                x,
+                args,
+                n_jobs=min(n_cores, n_tot),
+                desc=desc,
+                unit="matrix",
+                verbose=verbose,
+            )
         else:
-            results = []
-            if verbose:
-                with tqdm(total=n_tot) as pbar:
-                    for p_sel, r_sel in zip(pot_sels, rec_sels):
-                        results += [x(p_sel, r_sel)]
-                        pbar.update(1)
-            else:
-                for p_sel, r_sel in zip(pot_sels, rec_sels):
-                        results += [x(p_sel, r_sel)]
-        
-        
+            results = [
+                x(p_sel, r_sel)
+                for p_sel, r_sel in bar(
+                    args, desc=desc, unit="matrix", verbose=verbose
+                )
+            ]
 
-        if verbose:
-            print("storing the results")
-            with tqdm(total=n_tot) as pbar:
-                for i in range(n_tot):
-                    eigvals, eigvecs = results[i][0], results[i][1]
+        for i in range(n_tot):
+            eigvals, eigvecs = results[i][0], results[i][1]
 
-                    idx = eigvals.argsort()
-                    eigvals = eigvals[idx]
-                    eigvecs = eigvecs[:, idx]
+            idx = eigvals.argsort()
+            eigvals = eigvals[idx]
+            eigvecs = eigvecs[:, idx]
 
-                    eigva.loc[sels[i]] = eigvals
-                    eigve.loc[sels[i]] = eigvecs
-                    pbar.update(1)
-        else:
-            for i in range(n_tot):
-                    eigvals, eigvecs = results[i][0], results[i][1]
-
-                    idx = eigvals.argsort()
-                    eigvals = eigvals[idx]
-                    eigvecs = eigvecs[:, idx]
-
-                    eigva.loc[sels[i]] = eigvals
-                    eigve.loc[sels[i]] = eigvecs
+            eigva.loc[sels[i]] = eigvals
+            eigve.loc[sels[i]] = eigvecs
 
         if len(potential_dims) > 0:
             eigva = eigva.unstack(dim="potdims")
@@ -611,6 +599,7 @@ class PWSolver:
         eigve: xr.DataArray,
         coords: list[xr.DataArray] | None = None,
         vectorized:bool = False,
+        verbose: bool = True,
     ) -> xr.DataArray:
         """Compute the spatial shape of the eigenvectors from their plane-wave expression
 
@@ -622,6 +611,8 @@ class PWSolver:
             vectorized (bool, optional): Wheter to sum over reciprocal vectors all at once or sequencially. The fully vectorized sum can be slow if the
             resulting matrix is too large. Only consulted when 'coords' is given, since the FFT route
             replaces both. Defaults to False.
+            verbose (bool, optional): Whether to plot a progress bar over the reciprocal vectors.
+            Only relevant for the sequential sum. Defaults to True.
 
         Returns:
             xr.DataArray
@@ -646,11 +637,14 @@ class PWSolver:
         # it is the convention that reproduces the FDSolver eigenvectors.
         if vectorized:
             u = (eigve * np.exp(-1j * phase())).sum('g')
-            print(end = '\r')
         else:
-            print('summing...')
             u = 0
-            for ig in trange(eigve.sizes['g']):
+            for ig in bar(
+                range(eigve.sizes['g']),
+                desc="Summing bands",
+                unit="band",
+                verbose=verbose,
+            ):
                 u += eigve[{'g':ig}] * np.exp(-1j * phase({'g':ig}))
 
         return self.normalize(u)

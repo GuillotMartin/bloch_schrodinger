@@ -3,11 +3,10 @@ import itertools
 import numpy as np
 import scipy.sparse as sps
 import xarray as xr
-from joblib import Parallel, delayed
 from scipy.sparse.linalg import eigsh
-from tqdm import tqdm
 
 from bloch_schrodinger.potential import Potential
+from bloch_schrodinger.progress import bar, parallel_map
 from bloch_schrodinger.utils import empty_from_coords
 
 
@@ -781,6 +780,7 @@ class FDSolver:
         keep_vecs: bool = True,
         parallel: bool = False,
         n_cores: int = -1,
+        verbose: bool = True,
         **kwargs,
     ) -> tuple[xr.DataArray, xr.DataArray]:
         """Solve the eigenvalue problem at every points of the parameter space, using the scipy.sparse.eigsh function.
@@ -790,6 +790,7 @@ class FDSolver:
             keep_vecs (bool, optional): Whether to also compute and return the eigenvectors. Default to True.
             parallel (bool, optional): Whether to parallelize the solver with joblib. Default to False.
             n_cores (int, optional): The number of cores to use for the solver, set to -1 to use all cores available. default to -1.
+            verbose (bool, optional): Whether to plot a progress bar over the diagonalizations. Default to True.
         Returns:
             tuple[xr.DataArray, xr.DataArray] or xr.DataArray: the eigenvalues, and the eigenvectors if keep_vecs is True
             (otherwise the eigenvalues alone).
@@ -909,37 +910,37 @@ class FDSolver:
             ham = self.create_hamiltonian(pot_sel, alpha_sel, rec_sel, cou_sel)
             return eigsh(ham, k=n_eigva, v0=X[:, 0], which="SA")
 
-        print(f"Performing {n_tot} diagonalizations...")
+        args = list(
+            zip(potential_sels, alpha_sels, reciprocal_sels, coupling_sels)
+        )
+
         if parallel:
-            parallel = Parallel(n_jobs=min(n_cores, n_tot), return_as="list", verbose=5)
-            results = parallel(
-                delayed(x)(p, a, r, c)
-                for p, a, r, c in zip(
-                    potential_sels, alpha_sels, reciprocal_sels, coupling_sels
-                )
+            results = parallel_map(
+                x,
+                args,
+                n_jobs=min(n_cores, n_tot),
+                desc="Diagonalizing",
+                unit="matrix",
+                verbose=verbose,
             )
         else:
-            results = []
-            with tqdm(total=n_tot) as pbar:
-                for p, a, r, c in zip(
-                    potential_sels, alpha_sels, reciprocal_sels, coupling_sels
-                ):
-                    results += [x(p, a, r, c)]
-                    pbar.update(1)
+            results = [
+                x(p, a, r, c)
+                for p, a, r, c in bar(
+                    args, desc="Diagonalizing", unit="matrix", verbose=verbose
+                )
+            ]
 
-        print("storing the results")
-        with tqdm(total=n_tot) as pbar:
-            for i in range(n_tot):
-                eigvals, eigvecs = results[i][0], results[i][1]
+        for i in range(n_tot):
+            eigvals, eigvecs = results[i][0], results[i][1]
 
-                idx = eigvals.argsort()
-                eigvals = eigvals[idx]
-                eigvecs = eigvecs[:, idx]
+            idx = eigvals.argsort()
+            eigvals = eigvals[idx]
+            eigvecs = eigvecs[:, idx]
 
-                eigva.loc[sels[i]] = eigvals
-                if keep_vecs:
-                    eigve.loc[sels[i]] = eigvecs
-                pbar.update(1)
+            eigva.loc[sels[i]] = eigvals
+            if keep_vecs:
+                eigve.loc[sels[i]] = eigvecs
 
         if len(potential_dims) > 0:
             eigva = eigva.unstack(dim="potdims")
