@@ -13,7 +13,7 @@ from setuptools import Command, find_packages, setup
 
 # Package meta-data.
 NAME = 'bloch_schrodinger'
-DESCRIPTION = 'A solver for the 2D schrödinger equation.'
+DESCRIPTION = 'A solver for the 1D/2D/3D Bloch-Schrödinger equation, with finite-difference and plane-wave solvers, multi-field coupling, and Wannier functions.'
 URL = 'https://github.com/me/myproject'
 EMAIL = 'guillotmartin@yahoo.com'
 AUTHOR = 'Martin Guillot'
