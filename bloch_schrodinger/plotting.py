@@ -4,6 +4,8 @@ from types import NoneType
 
 import matplotlib
 import matplotlib.pyplot as plt
+import json
+
 import numpy as np
 import plotly.graph_objects as go
 import xarray as xr
@@ -52,15 +54,182 @@ def _to_orthogonal(
     )
 
 
+def _rank1_axis(values: np.ndarray) -> int | None:
+    """The single array axis a coordinate actually varies along, or None if it varies along more.
+
+    A cartesian coordinate built over a lattice is stored dense, with one entry per lattice point,
+    even when the box is axis-aligned and the coordinate really only depends on one of them. This
+    is the same test 'Potential.coords_1d' makes on the other side of the package: an axis-aligned
+    coordinate has zero peak-to-peak spread along every axis but its own.
+
+    Args:
+        values (np.ndarray): A coordinate evaluated over the lattice.
+
+    Returns:
+        int or None: The axis it varies along, or None if no single axis accounts for it.
+    """
+    for i in range(values.ndim):
+        others = tuple(j for j in range(values.ndim) if j != i)
+        if not others or np.ptp(values, axis=others).max() == 0:
+            return i
+    return None
+
+
+def _aligned_axes(data: xr.DataArray, spatial_dims: list[str]) -> list[int] | None:
+    """Which lattice axis each cartesian coordinate runs along, or None for a skewed lattice.
+
+    When every cartesian coordinate varies along exactly one lattice axis -- and no two share one --
+    the lattice already *is* a cartesian grid, just labelled by lattice index rather than by
+    position. Plotting it then needs no interpolation at all: the data can be drawn on its own
+    lattice and the axes labelled from the coordinates, which is what the moving-grid path does.
+
+    This matters because the alternative is expensive out of all proportion. '_to_orthogonal'
+    interpolates the *whole* array at setup, and on a swept 3-D run that is tens of gigabytes of
+    'interp' to achieve what is, in this case, a transposition and a relabelling.
+
+    A genuinely skewed lattice -- a triangular one, say -- returns None and is interpolated as
+    before, since there the cartesian and lattice axes really do mix.
+
+    Args:
+        data (xr.DataArray): The field, carrying cartesian coordinates over its lattice.
+        spatial_dims (list[str]): The lattice dims, in axis order.
+
+    Returns:
+        list[int] or None: For each cartesian axis, the index into 'spatial_dims' it runs along;
+        None if the lattice is skewed, or if a cartesian coordinate is missing or depends on a
+        non-lattice dimension.
+    """
+    axes = []
+    for i in range(len(spatial_dims)):
+        name = coord_names[i]
+        if name not in data.coords:
+            return None  # absent, or stored factored: either way not a static aligned lattice
+        coord = data.coords[name]
+        own = [d for d in spatial_dims if d in coord.dims]
+        if set(coord.dims) - set(spatial_dims) or not own:
+            return None  # varies with a parameter: a moving grid, handled elsewhere
+        axis = _rank1_axis(np.asarray(coord.transpose(*own).data))
+        if axis is None:
+            return None
+        axes.append(spatial_dims.index(own[axis]))
+    return axes if len(set(axes)) == len(axes) else None
+
+
+def _cart_factors(data: xr.DataArray, frame: dict | None = None) -> dict:
+    """The recipe for any cartesian coordinate stored as a product of other coordinates.
+
+    A moving frame is usually an outer product: a rescaling solver's grid is x = rho_x * lambda(t),
+    an invariant lattice times one number per time step. Stored as x itself that is an array the
+    size of the field; stored as its two factors it is a few kilobytes. This lets an array say so,
+    so the plotter can rebuild one frame at a time instead of being handed the whole product.
+
+    Nothing here knows what the factors mean or what they are called -- only that a coordinate may
+    be the product of others on the same array. The recipe comes from the explicit 'frame' argument
+    if given, else from the array's own 'cart_factors' attribute, which is JSON because netCDF
+    attributes cannot hold a mapping.
+
+    Args:
+        data (xr.DataArray): The field.
+        frame (dict, optional): An explicit recipe, e.g. {"x": ("rho_x", "lambda_x")}, overriding
+        whatever the array carries. Defaults to None.
+
+    Returns:
+        dict: Cartesian coordinate name -> the names of its factors. Empty when there are none.
+    """
+    if frame is not None:
+        return frame
+    raw = data.attrs.get("cart_factors")
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return raw or {}
+
+
+def _cart_dims(data: xr.DataArray, name: str, factors: dict) -> tuple[str, ...]:
+    """The dims a cartesian coordinate depends on, whether it is stored or factored."""
+    if name in data.coords:
+        return tuple(data.coords[name].dims)
+    return tuple(
+        dict.fromkeys(d for part in factors[name] for d in data.coords[part].dims)
+    )
+
+
+def _cart_at(data: xr.DataArray, name: str, factors: dict, sel: dict) -> xr.DataArray:
+    """One frame of a cartesian coordinate, rebuilt from its factors when it is not stored.
+
+    Each factor is selected down to this frame *before* the product is taken. Multiplying first
+    would build the whole outer product -- the very array the factored form exists to avoid -- and
+    only then throw all but one frame of it away.
+
+    Args:
+        data (xr.DataArray): The field.
+        name (str): The cartesian coordinate wanted.
+        factors (dict): From '_cart_factors'.
+        sel (dict): The current slider position.
+
+    Returns:
+        xr.DataArray: The coordinate over the plotted lattice, for this frame.
+    """
+    def at(coord):
+        return coord.sel(
+            {d: v for d, v in sel.items() if d in coord.dims}, method="nearest"
+        )
+
+    if name in data.coords:
+        return at(data.coords[name])
+    out = None
+    for part in factors[name]:
+        piece = at(data.coords[part])
+        out = piece if out is None else out * piece
+    return out
+
+
+def _relabel_cartesian(
+    data: xr.DataArray, spatial_dims: list[str], aligned: list[int]
+) -> xr.DataArray:
+    """Replace the lattice dims with the cartesian coordinates they run along.
+
+    This is '_to_orthogonal' for a lattice that is already cartesian: the same relabelling of
+    a1, a2, ... into x, y, ..., but taken exactly rather than interpolated. Every cartesian
+    coordinate here varies along a single lattice axis, so its dense form is a broadcast copy of
+    one line of values, and that line can simply become the axis' index.
+
+    Doing it this way is what keeps the rest of the function -- the sliders, their names and their
+    physical values, the transposes -- working exactly as it did when the data really was
+    interpolated. Only the cost changes: 'interp' over the whole array becomes a reshape of a few
+    hundred numbers.
+
+    Args:
+        data (xr.DataArray): The field, on an axis-aligned lattice.
+        spatial_dims (list[str]): The lattice dims, in axis order.
+        aligned (list[int]): From '_aligned_axes': the lattice axis each cartesian axis runs along.
+
+    Returns:
+        xr.DataArray: The same data, indexed by x, y, ... instead of a1, a2, ...
+    """
+    out = data
+    for i, lattice_axis in enumerate(aligned):
+        name, dim = coord_names[i], spatial_dims[lattice_axis]
+        line = out.coords[name]
+        line = line.isel({d: 0 for d in line.dims if d != dim})
+        out = out.assign_coords({name: (dim, np.asarray(line.data))}).swap_dims({dim: name})
+    return out.drop_vars(
+        [d for d in spatial_dims if d in out.coords], errors="ignore"
+    )
+
+
 def _moving_dims(
-    data: xr.DataArray, name: str, spatial_dims: list[str]
+    data: xr.DataArray, name: str, spatial_dims: list[str], factors: dict | None = None
 ) -> list[str]:
     """Return the non-spatial dims the cartesian coordinate 'name' depends on.
 
     A field living on a moving grid -- the output of a rescaling solver, say -- carries cartesian
     coordinates that are functions of the parameters, x(t, ...), rather than of the lattice alone.
     An empty list means the grid is fixed and the coordinate can be read once and reused."""
-    return [d for d in data.coords[name].dims if d not in spatial_dims]
+    return [
+        d
+        for d in _cart_dims(data, name, _cart_factors(data, factors))
+        if d not in spatial_dims
+    ]
 
 
 def _make_sliders(
@@ -714,6 +883,7 @@ def create_map(
     resolution:int|tuple[int] = None,
     template: dict = {},
     cst_bds: bool = False,
+    frame: dict | None = None,
 ) -> tuple[dict, Callable, Axes]:
     """A low-level function to handle the creation of interactive 2D plots
 
@@ -763,15 +933,26 @@ def create_map(
     spatial_dims = _spatial_dims(data)
     n_dims = len(spatial_dims)
     dim1, dim2 = coord_names[cart_axes[0]], coord_names[cart_axes[1]]
+    factors = _cart_factors(data, frame)
 
     # A moving grid is drawn on its own lattice instead of being interpolated onto a common cartesian
     # one, because there is no common one to speak of: it changes with the sliders. pcolormesh takes
     # the 2D X,Y mesh directly, so this handles any axis order and any number of dims on its own, and
     # it draws a skewed lattice as the skewed cells it really is rather than smoothing over them.
-    moving = bool(_moving_dims(data, dim1, spatial_dims))
+    moving = bool(_moving_dims(data, dim1, spatial_dims, factors))
     ortho = not moving and (cart_axes != [0, 1] or n_dims != 2)
+    native = moving
     if ortho:
-        data = _to_orthogonal(data, spatial_dims, resolution)
+        # An axis-aligned lattice is already a cartesian grid wearing lattice labels, so getting
+        # to x, y, z is a relabelling and not an interpolation. Taking it exactly costs nothing and
+        # leaves everything downstream -- slider names, their physical values, the transposes --
+        # exactly as it was. Only a genuinely skewed lattice, where the cartesian and lattice axes
+        # really do mix, is worth interpolating.
+        aligned = _aligned_axes(data, spatial_dims)
+        if aligned is None:
+            data = _to_orthogonal(data, spatial_dims, resolution)
+        else:
+            data = _relabel_cartesian(data, spatial_dims, aligned)
 
     if moving:
         # The slice through a leftover axis is a slice of constant lattice index, which is a plane of
@@ -796,11 +977,8 @@ def create_map(
         """The cartesian mesh the field is drawn on, at one position of the sliders."""
         out = []
         for name in (dim1, dim2):
-            coord = data.coords[name]
-            coord = coord.sel(
-                {d: v for d, v in sel.items() if d in coord.dims}, method="nearest"
-            )
-            out += [coord.transpose(*mesh_dims) if moving else coord]
+            coord = _cart_at(data, name, factors, sel)
+            out += [coord.transpose(*mesh_dims) if native else coord]
         return out[0], out[1]
 
     # Creating the fkwargs key just in case, to avoid testing its existence every time
@@ -829,7 +1007,7 @@ def create_map(
     plot_init = data.sel(initial_field_sel, method="nearest")
     if ortho:
         plot_init = plot_init.transpose(dim2, dim1)
-    elif moving:
+    elif native:
         plot_init = plot_init.transpose(*mesh_dims)
 
     obj = func(ax, X, Y, plot_init, **template["fkwargs"])
@@ -871,11 +1049,14 @@ def create_map(
         new_plot = data.sel(field_sel, method="nearest")
         if ortho:
             new_plot = new_plot.transpose(dim2, dim1)
-        elif moving:
+        elif native:
             new_plot = new_plot.transpose(*mesh_dims)
 
         # On a moving grid the mesh itself has to be rebuilt, so the artist cannot be updated in
-        # place even for a pcolormesh: its geometry, not just its values, is what changed.
+        # place even for a pcolormesh: its geometry, not just its values, is what changed. An
+        # axis-aligned static lattice is the opposite case: its coordinates are rank-1, so slicing
+        # a leftover lattice axis leaves the mesh exactly as it was and the values can be set in
+        # place.
         newX, newY = mesh_at(sel) if moving else (X, Y)
         if moving or method in ["contour", "contourf"]:
             if hasattr(obj, "collections"):
@@ -936,7 +1117,12 @@ def create_line(
     moving = bool(_moving_dims(data, dim1, spatial_dims))
     ortho = not moving and n_dims != 1
     if ortho:
-        data = _to_orthogonal(data, spatial_dims, resolution)
+        # See 'create_map': an axis-aligned lattice is relabelled exactly rather than interpolated.
+        aligned = _aligned_axes(data, spatial_dims)
+        if aligned is None:
+            data = _to_orthogonal(data, spatial_dims, resolution)
+        else:
+            data = _relabel_cartesian(data, spatial_dims, aligned)
 
     if moving:
         plotted_dims = [spatial_dims[cart_axis]]
