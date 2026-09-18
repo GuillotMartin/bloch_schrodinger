@@ -1,3 +1,4 @@
+import builtins
 import itertools
 
 import numpy as np
@@ -741,9 +742,17 @@ class FDSolver:
 
         # --- Add the coupling terms to the Hamiltonian ---
         # Overlay total_sel on a copy, so concurrent calls don't mutate shared solver state
+        #
+        # The ordinary builtins are in scope. An empty '__builtins__' reads as a sandbox but is not
+        # one -- the coupling strings are written by the caller in their own script, and
+        # 'coupling_context' hands them numpy, so anything reachable by eval was already reachable.
+        # What it does break is any array library that introspects the calling frame while
+        # compiling a kernel: cupy looks up '__import__' there and raises KeyError without it, and
+        # only on a cold kernel cache, which makes the failure look intermittent and unrelated to
+        # the coupling. See 'ParametricPotential.eval_terms', which had exactly this bug.
         eval_context = {**self.coupling_context, **total_sel}
         for coupling in self.couplings:
-            ham += eval(coupling, {"__builtins__": {}}, eval_context)
+            ham += eval(coupling, {"__builtins__": builtins}, eval_context)
 
         return ham
 

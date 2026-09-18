@@ -291,7 +291,10 @@ def create_cart_grid(
         tmp_resolution[longest] = resolution
         for i in range(n_dims):
             if i != longest:
-                tmp_resolution[i] = int(resolution * rng[i] / np.max(rng))
+                # At least two points: an axis much shorter than the longest one truncates to one
+                # or even zero here, and a single-point axis is not a grid -- it gives a degenerate
+                # coordinate that has no spacing to speak of and breaks every consumer downstream.
+                tmp_resolution[i] = max(2, int(resolution * rng[i] / np.max(rng)))
 
         resolution = tmp_resolution
     coords = []

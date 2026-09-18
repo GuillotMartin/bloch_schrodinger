@@ -144,6 +144,42 @@ class Potential:
             self.a1 = self.a[0]
             self.a2 = self.a[1]
 
+    def coords_1d(self) -> list[np.ndarray] | None:
+        """The cartesian coordinates as 1-D arrays shaped to broadcast, or None for a skewed box.
+
+        Each cartesian coordinate is built above as a sum over *every* lattice axis, weighted by a
+        component of the unit-cell matrix. For an axis-aligned box the off-diagonal weights are
+        zero, but '0.0 * DataArray(dims=("a2",))' still carries its dimension, so the sum
+        broadcasts and 'x' comes out a full grid whose columns are all identical. On a 512^2 grid
+        that is 2 MiB per axis of an array with 512 distinct values in it, and it propagates: the
+        solvers square it, scale it by the frame every step, and stream it through every reduction.
+
+        Returned as shape (1, .., n_i, .., 1) so it broadcasts against the grid exactly where the
+        dense version would, which is what lets a caller swap one for the other without touching
+        the arithmetic. Note that reductions are the exception and do have to be rewritten:
+        multiplying a grid by a column vector strides badly enough to be slower than the dense
+        form, so the saving only materializes once the sums are written per-axis.
+
+        Returns:
+            list[np.ndarray] or None: One broadcastable array per axis, or None if any coordinate
+            genuinely varies along another lattice axis, in which case there is nothing to reduce
+            and the caller should keep the dense grids.
+        """
+        out = []
+        for i in range(self.n_dims):
+            c = np.asarray(self.coords[i].data)
+            others = tuple(j for j in range(c.ndim) if j != i)
+            # A coordinate that really is rank-1 does not vary along any other axis.
+            if others and np.ptp(c, axis=others).max() != 0:
+                return None
+            line = c
+            for j in sorted(others, reverse=True):
+                line = line.take(0, axis=j)
+            shape = [1] * self.n_dims
+            shape[i] = line.size
+            out.append(line.reshape(shape))
+        return out
+
     def _add_aliases(self):
         """Add "x", "y", "z" aliases for the cartesian coordinates.
         """
