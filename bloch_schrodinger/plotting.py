@@ -932,16 +932,20 @@ def create_map(
 
     spatial_dims = _spatial_dims(data)
     n_dims = len(spatial_dims)
-    dim1, dim2 = coord_names[cart_axes[0]], coord_names[cart_axes[1]]
+    
+    spatial_plot = isinstance(cart_axes[0], int) or isinstance(cart_axes[1], int)
     factors = _cart_factors(data, frame)
+    dim1 = coord_names[cart_axes[0]] if isinstance(cart_axes[0], int) else cart_axes[0]
+    dim2 = coord_names[cart_axes[1]] if isinstance(cart_axes[1], int) else cart_axes[1]
 
     # A moving grid is drawn on its own lattice instead of being interpolated onto a common cartesian
     # one, because there is no common one to speak of: it changes with the sliders. pcolormesh takes
     # the 2D X,Y mesh directly, so this handles any axis order and any number of dims on its own, and
     # it draws a skewed lattice as the skewed cells it really is rather than smoothing over them.
-    moving = bool(_moving_dims(data, dim1, spatial_dims, factors))
+    moving = bool(_moving_dims(data, dim1, spatial_dims, factors)) and spatial_dims
     ortho = not moving and (cart_axes != [0, 1] or n_dims != 2)
     native = moving
+    
     if ortho:
         # An axis-aligned lattice is already a cartesian grid wearing lattice labels, so getting
         # to x, y, z is a relabelling and not an interpolation. Taking it exactly costs nothing and
@@ -954,17 +958,22 @@ def create_map(
         else:
             data = _relabel_cartesian(data, spatial_dims, aligned)
 
-    if moving:
-        # The slice through a leftover axis is a slice of constant lattice index, which is a plane of
-        # constant z only as long as the grid is axis-aligned -- as a rescaling solver's always is.
-        plotted_dims = [spatial_dims[d] for d in cart_axes]
-        leftover_spatial = [spatial_dims[d] for d in range(n_dims) if d not in cart_axes]
+    if spatial_plot:
+        if moving:
+            # The slice through a leftover axis is a slice of constant lattice index, which is a plane of
+            # constant z only as long as the grid is axis-aligned -- as a rescaling solver's always is.
+            plotted_dims = [spatial_dims[d] for d in cart_axes]
+            leftover_spatial = [spatial_dims[d] for d in range(n_dims) if d not in cart_axes]
+        else:
+            plotted_dims = [dim1, dim2] if ortho else spatial_dims
+            leftover_spatial = (
+                [coord_names[d] for d in range(n_dims) if d not in cart_axes] if ortho else []
+            )
     else:
-        plotted_dims = [dim1, dim2] if ortho else spatial_dims
+        plotted_dims = [dim1, dim2]
         leftover_spatial = (
-            [coord_names[d] for d in range(n_dims) if d not in cart_axes] if ortho else []
+            [coord_names[d] for d in range(n_dims)] if ortho else []
         )
-
     # Creating the sliders objects
     slider_dims = [dim for dim in data.dims if dim not in plotted_dims]
     sliders = _make_sliders(data, slider_dims, leftover_spatial, template)
