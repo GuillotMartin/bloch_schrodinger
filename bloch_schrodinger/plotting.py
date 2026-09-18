@@ -473,29 +473,46 @@ matplotlib.rcParams["mathtext.fontset"] = "cm"
 matplotlib.rcParams["font.family"] = "STIXGeneral"
 
 
-def contour_tmpl(lvls: int | np.ndarray = 3) -> dict:
-    """Return a simple contour plot template for general purpose use.
+def contour_tmpl(
+    lvls: int | np.ndarray = 3,
+    *,
+    colors: str | np.ndarray = "gray",
+    linewidths: float = 0.5,
+    linestyles: str = "dashed",
+) -> dict:
+    """Return a contour-line template, for overlaying an outline on a filled map.
 
     Args:
-        lvls (Union[int, np.ndarray]): If an integer, the number of contour levels, if an array, each entry specifies the height of a level.
+        lvls (int or np.ndarray): If an integer, the number of contour levels; if an array, the
+        height of each level.
+        colors (str or np.ndarray, optional): The line colour, or one colour per level. Defaults
+        to "gray".
+        linewidths (float, optional): Defaults to 0.5.
+        linestyles (str, optional): Defaults to "dashed".
+
     Returns:
-        dict
+        dict: The template.
     """
     return {
         "fkwargs": {
             "levels": lvls,
-            "colors": "gray",
-            "linewidths": 0.5,
-            "linestyles": "dashed",
+            "colors": colors,
+            "linewidths": linewidths,
+            "linestyles": linestyles,
         }
     }
 
 
-def quiver_tmpl() -> dict:
-    """Return a simple contour plot template for general purpose use.
+def quiver_tmpl(density: int = 2, **fkwargs) -> dict:
+    """Return an arrow-field template, for overlaying a vector field on a map.
+
+    Args:
+        density (int, optional): Keep every n-th arrow along each axis, to thin a crowded
+        field. Defaults to 2.
+        **fkwargs: Overrides passed on to Axes.quiver, e.g. color, scale, width, headwidth.
 
     Returns:
-        dict
+        dict: The template.
     """
     return {
         "fkwargs": {
@@ -504,79 +521,63 @@ def quiver_tmpl() -> dict:
             "scale_units": "width",
             "scale": 0.0003,
             "pivot": "mid",
+            **fkwargs,
         },
-        "density": 2,
+        "density": density,
     }
 
 
-def cmesh_tmpl(name: str) -> dict:
-    """Create simple prefiled templates for a pcolormesh object.
+def _cmesh_presets() -> dict[str, dict]:
+    """The colour-map presets, rebuilt on every call.
 
-    Args:
-        name (str): a template chosen between "amplitude", "amplitude - log", "real", "real - log" and "phase"
+    Built fresh rather than held in a module constant because a caller is handed the dict
+    itself and may well patch it, and because the norms are factories that get called once per
+    map. A shared constant would leak both.
 
-    Returns:
-        dict: _description_
+    The diverging presets use maps whose midpoint is a light neutral, so that zero reads as
+    nothing. A diverging map with a coloured or dark midpoint -- 'berlin', which 'real' used to
+    default to, has a midpoint of near-black -- makes zero look like an extreme value, which is
+    the opposite of what a signed quantity needs.
     """
-
-    if name == "amplitude":
-        temp = {
+    sci = {"format": "{x:.1e}"}
+    return {
+        "amplitude": {
             "fkwargs": {
                 "cmap": cm.oslo_r,
                 "rasterized": True,
-                "norm": lambda: (
-                    colors.Normalize()
-                ),  # using a factory function to avoid colormap sharing
+                "norm": lambda: colors.Normalize(),
             },
             "autoscale": True,
-            "colorbar": {"kwargs": {"format": "{x:.1e}"}},
-        }
-        return temp
-
-    if name == "amplitude - log":
-        temp = {
+            "colorbar": {"kwargs": dict(sci)},
+        },
+        "amplitude - log": {
             "fkwargs": {
                 "cmap": cm.oslo,
                 "rasterized": True,
-                "norm": lambda: (
-                    colors.LogNorm()
-                ),  # using a factory function to avoid colormap sharing
+                "norm": lambda: colors.LogNorm(),
             },
             "autoscale": True,
-            "colorbar": {"kwargs": {"format": "{x:.1e}"}},
-        }
-        return temp
-
-    if name == "real":
-        temp = {
+            "colorbar": {"kwargs": dict(sci)},
+        },
+        "real": {
             "fkwargs": {
-                "cmap": cm.berlin,
+                "cmap": cm.vik,
                 "rasterized": True,
-                "norm": lambda: (
-                    colors.CenteredNorm()
-                ),  # using a factory function to avoid colormap sharing
+                "norm": lambda: colors.CenteredNorm(),
             },
             "autoscale": True,
-            "colorbar": {"kwargs": {"format": "{x:.1e}"}},
-        }
-        return temp
-
-    if name == "real - log":
-        temp = {
+            "colorbar": {"kwargs": dict(sci)},
+        },
+        "real - log": {
             "fkwargs": {
-                "cmap": cm.berlin,
+                "cmap": cm.vik,
                 "rasterized": True,
-                "norm": lambda: colors.SymLogNorm(
-                    linthresh=1e-12
-                ),  # using a factory function to avoid colormap sharing
+                "norm": lambda: colors.SymLogNorm(linthresh=1e-12),
             },
             "autoscale": True,
-            "colorbar": {"kwargs": {"format": "{x:.1e}"}},
-        }
-        return temp
-
-    if name == "phase":
-        temp = {
+            "colorbar": {"kwargs": dict(sci)},
+        },
+        "phase": {
             "fkwargs": {
                 "cmap": "twilight",
                 "rasterized": True,
@@ -584,14 +585,219 @@ def cmesh_tmpl(name: str) -> dict:
                 "vmax": np.pi,
             },
             "colorbar": {
-                "kwargs": {
-                    "label": r"$\phi$",
-                },
+                "kwargs": {"label": r"$\phi$"},
                 "ticks": [-np.pi, 0, np.pi],
                 "tickslabel": [r"$-\pi$", "0", r"$\pi$"],
             },
-        }
-        return temp
+        },
+        "potential": {
+            "fkwargs": {
+                "cmap": cm.cork,
+                "rasterized": True,
+                "norm": lambda: colors.CenteredNorm(),
+            },
+            "autoscale": True,
+            "colorbar": {"kwargs": {"label": r"$V/E_r$", **sci}},
+        },
+        "difference": {
+            # For a difference the sign is the whole point, so the format carries one
+            "fkwargs": {
+                "cmap": cm.vik,
+                "rasterized": True,
+                "norm": lambda: colors.CenteredNorm(),
+            },
+            "autoscale": True,
+            "colorbar": {"kwargs": {"format": "{x:+.1e}"}},
+        },
+        "spin": {
+            "fkwargs": {
+                "cmap": cm.vik,
+                "rasterized": True,
+                "vmin": -1,
+                "vmax": 1,
+            },
+            "colorbar": {
+                "kwargs": {"label": r"$S_z$"},
+                "ticks": [-1, 0, 1],
+                "tickslabel": [r"$\sigma_-$", r"$\pi$", r"$\sigma_+$"],
+            },
+        },
+    }
+
+
+def cmesh_tmpl(
+    name: str,
+    *,
+    cmap: "str | colors.Colormap | None" = None,
+    label: str | None = None,
+    clim: tuple[float, float] | None = None,
+    fmt: str | None = None,
+    ticks: list | None = None,
+    tickslabel: list[str] | None = None,
+) -> dict:
+    """Return a prefilled template for a pcolormesh, contour or contourf.
+
+    The keyword arguments cover the tweaks that otherwise get made by patching the returned
+    dict, which is easy to get wrong and easy to do to a template that is shared between
+    subplots. Called with a name alone, this returns exactly what it always has.
+
+    Args:
+        name (str): One of 'amplitude', 'amplitude - log', 'real', 'real - log', 'phase',
+        'potential', 'difference' or 'spin'.
+        cmap (str or Colormap, optional): Replaces the preset's colormap. Defaults to None.
+        label (str, optional): The colorbar label. Defaults to None.
+        clim (tuple[float, float], optional): Fixed colour limits. Setting these also turns
+        'autoscale' off, since limits that are then rescaled away are no limits at all.
+        Defaults to None.
+        fmt (str, optional): The colorbar tick format, e.g. '{x:.2f}'. Defaults to None.
+        ticks (list, optional): Colorbar tick positions. Defaults to None.
+        tickslabel (list[str], optional): Colorbar tick labels, e.g. two poles rather than
+        three for a spin map. Defaults to None.
+
+    Returns:
+        dict: The template, safe to modify further.
+
+    Raises:
+        ValueError: If 'name' is not one of the presets. It used to return None instead, which
+        drew an unstyled plot and so made a mistyped name invisible.
+    """
+    presets = _cmesh_presets()
+    if name not in presets:
+        raise ValueError(
+            f"unknown template {name!r}; choose one of "
+            + ", ".join(repr(k) for k in presets)
+        )
+    temp = presets[name]
+
+    if cmap is not None:
+        temp["fkwargs"]["cmap"] = cmap
+    if clim is not None:
+        temp["clim"] = tuple(clim)
+        temp["autoscale"] = False
+    if any(v is not None for v in (label, fmt, ticks, tickslabel)):
+        colorbar = temp.setdefault("colorbar", {})
+        kwargs = colorbar.setdefault("kwargs", {})
+        if label is not None:
+            kwargs["label"] = label
+        if fmt is not None:
+            kwargs["format"] = fmt
+        if ticks is not None:
+            colorbar["ticks"] = list(ticks)
+        if tickslabel is not None:
+            colorbar["tickslabel"] = list(tickslabel)
+    return temp
+
+
+@dataclass(frozen=True)
+class LayerPair:
+    """Two templates for two passes over the *same* field: filled bands, then their outlines.
+
+    Deliberately not a tuple. 'plot_eigenvector' reads a 2-tuple template as
+    (field, potential-contour), so handing it a bare pair meant for one field would quietly
+    style the potential's contours with the outline instead. Unpacking still works, which is
+    how it is normally used:
+
+        filled, outline = signed_log_tmpl(6)
+    """
+
+    filled: dict
+    outline: dict
+
+    def __iter__(self):
+        yield self.filled
+        yield self.outline
+
+
+def signed_log_tmpl(
+    decades: int = 6,
+    *,
+    label: str | None = None,
+    cmap: "colors.Colormap | None" = None,
+    linewidths: float = 0.5,
+    outline: str = "k",
+) -> LayerPair:
+    """Return the pair of templates for a signed quantity spanning many decades.
+
+    A Wannier function is the case this exists for: it is signed, it decays over six or more
+    orders of magnitude, and both facts matter at once. Neither a linear scale, which shows
+    only the central lobe, nor a log scale, which throws the sign away, works. The answer is
+    discrete filled bands on a symmetric log ladder through zero, drawn in a diverging map with
+    the band straddling zero left white so that the tails read as empty rather than as small.
+
+    The field is expected to be normalised so that its extreme magnitude is one, as
+    'w / w.max()' gives; the ladder runs from ten-to-the-minus-decades-plus-one up to one.
+
+    Args:
+        decades (int, optional): How many decades each side of zero. Defaults to 6.
+        label (str, optional): The colorbar label. Defaults to None.
+        cmap (Colormap, optional): The diverging map the bands are drawn from. Defaults to cm.vik.
+        linewidths (float, optional): Width of the outlines. Defaults to 0.5.
+        outline (str, optional): Colour of the outlines. Defaults to "k".
+
+    Returns:
+        LayerPair: '.filled' for a 'contourf' pass and '.outline' for a 'contour' pass over the
+        same data, in that order. Both carry the same levels, which is what keeps the outlines
+        on the band edges.
+    """
+    if cmap is None:
+        cmap = cm.vik
+
+    magnitudes = np.logspace(-decades + 1, 0, decades)
+    levels = np.append(-magnitudes[::-1], magnitudes)
+
+    # One colour per *band*, of which there is one fewer than there are boundaries. Sampling the
+    # interior of the ramp this way reproduces the colours the hand-written version drew, which
+    # passed one colour too many and relied on matplotlib discarding the last.
+    band_colors = cmap(np.linspace(0, 1, 2 * decades + 1)[1:-1])
+    # The band straddling zero covers everything below the smallest decade, which is noise
+    band_colors[decades - 1] = [1, 1, 1, 1]
+
+    ticklabels = [rf"$-10^{{{-e}}}$" for e in range(decades)] + [
+        rf"$10^{{{e}}}$" for e in range(-decades + 1, 1)
+    ]
+    # ten to the zero is one, and reads better written that way
+    ticklabels[0], ticklabels[-1] = "$-1$", "$1$"
+
+    filled = {
+        "fkwargs": {"levels": levels, "colors": band_colors},
+        "colorbar": {"kwargs": {}, "ticks": levels, "tickslabel": ticklabels},
+    }
+    if label is not None:
+        filled["colorbar"]["kwargs"]["label"] = label
+
+    return LayerPair(
+        filled,
+        {
+            "fkwargs": {
+                "levels": levels,
+                "colors": outline,
+                "linestyles": "solid",
+                "linewidths": linewidths,
+            }
+        },
+    )
+
+
+def _apply_axes(ax: Axes, spec: dict | None):
+    """Apply a template's 'axes' section: the labels and aspect otherwise set by hand.
+
+    Applied once, at setup, because none of it changes as the sliders move. Axis *limits* are
+    deliberately not part of this: on a moving grid the limits are the one thing the drawing
+    helpers manage themselves, frame by frame or spanned across the whole run, and a template
+    setting them as well would mean two rules for one property.
+
+    Args:
+        ax (Axes): The axes to label.
+        spec (dict, optional): The 'axes' entry, with any of 'xlabel', 'ylabel' and 'aspect'.
+    """
+    if not spec:
+        return
+    if spec.get("xlabel") is not None:
+        ax.set_xlabel(spec["xlabel"])
+    if spec.get("ylabel") is not None:
+        ax.set_ylabel(spec["ylabel"])
+    if spec.get("aspect") is not None:
+        ax.set_aspect(spec["aspect"])
 
 
 def _prepare_template(template: dict | None) -> dict:
@@ -616,7 +822,12 @@ def _prepare_template(template: dict | None) -> dict:
     if out.get("fkwargs") is None:
         out["fkwargs"] = {}
     norm = out["fkwargs"].get("norm")
-    if callable(norm):
+    # A Normalize is itself callable -- it maps values into 0..1 -- so a norm passed as an
+    # instance rather than as a factory would be called here with no arguments and raise a
+    # TypeError from deep inside matplotlib, naming nothing that would point a caller at the
+    # real problem. An instance needs no calling anyway: the deepcopy above already gave this
+    # template its own, so it cannot share a colour scale with anyone else either.
+    if callable(norm) and not isinstance(norm, colors.Normalize):
         out["fkwargs"]["norm"] = norm()
     return out
 
@@ -695,6 +906,12 @@ def _format_template(
         given = tuple(
             t if isinstance(t, dict) else cmesh_tmpl(t) for t in head
         ) + tuple(template[1:])
+    elif isinstance(template, LayerPair):
+        raise ValueError(
+            "signed_log_tmpl returns two passes over the same field, not a field and a "
+            "potential contour, so it cannot be one template entry. Unpack it and make two "
+            "calls: filled, outline = signed_log_tmpl(...)"
+        )
     else:
         raise ValueError(
             "Each template entry must be a string, a dict, a tuple of those, or None; "
@@ -1194,6 +1411,7 @@ def create_map(
     if template.get("clim"):
         obj.set_clim(template["clim"][0], template["clim"][1])
     _add_colorbar(fig, ax, obj, template.get("colorbar"))
+    _apply_axes(ax, template.get("axes"))
 
     # On a moving grid the mesh itself has to be rebuilt, so the artist cannot be updated in
     # place even for a pcolormesh: its geometry, not just its values, is what changed. A contour
@@ -1270,6 +1488,7 @@ def create_line(
     )
     if layout.mode == "moving" and not cst_bds:
         ax.set_xlim(float(X.min()), float(X.max()))
+    _apply_axes(ax, template.get("axes"))
 
     def update(**kwargs):
         sel = {dim: kwargs[dim] for dim in sliders}
@@ -1368,6 +1587,7 @@ def create_quiver(
     obj = Axes.quiver(ax, *parts, **template["fkwargs"])
     set_limits(parts[0], parts[1])
     _add_colorbar(fig, ax, obj, template.get("colorbar"))
+    _apply_axes(ax, template.get("axes"))
 
     def update(**kwargs):
         nonlocal obj
@@ -2023,7 +2243,12 @@ def plot_eigenvector(
                     ax.set_xlim(*_cart_extent(bounds, axis_names[0], bound_factors))
                     if len(cart_axe) == 2:
                         ax.set_ylim(*_cart_extent(bounds, axis_names[1], bound_factors))
-            if len(cart_axe) == 2:
+            # Equal by default, since a field on a lattice should be drawn in real
+            # proportions, but not when a template has asked for something else: a map over two
+            # parameters has no reason to be square.
+            if len(cart_axe) == 2 and not any(
+                (layer.get("axes") or {}).get("aspect") for layer in template
+            ):
                 ax.set_aspect("equal")
             axes[i][j] = ax
 

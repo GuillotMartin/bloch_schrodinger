@@ -13,4 +13,8 @@ This folder contains the package's Jupyter tutorials. They are meant to be read 
 9. [PlaneWaveSolver.ipynb](PlaneWaveSolver.ipynb) — the `PWSolver` class, a fast alternative to `FDSolver` for smooth potentials.
 10. [Wannier.ipynb](Wannier.ipynb) — maximally localized Wannier functions, builds on `PWSolver`.
 
+## Reference
+
+- [templates.md](templates.md) — the plotting template cheat sheet: every key, which function reads it, the presets, and how to write your own.
+
 Most tutorials use 2D examples for simplicity, but the package supports 1D, 2D and 3D potentials and solvers throughout (see `nDimensions.ipynb`).
