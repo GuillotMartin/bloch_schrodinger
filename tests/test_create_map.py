@@ -198,7 +198,7 @@ def test_factored_frame_is_recognised_as_moving(moving):
 
 def test_one_frame_costs_a_bounded_number_of_chunks(aligned3d):
     """A whole-array interp or a whole-array transform blows this budget immediately."""
-    dask = pytest.importorskip("dask")
+    pytest.importorskip("dask")
     from dask.callbacks import Callback
 
     # chunked one frame per block, and made big enough that evaluating everything is unmistakable
@@ -218,8 +218,11 @@ def test_one_frame_costs_a_bounded_number_of_chunks(aligned3d):
 
     with Count() as counter:
         draw(lazy, [0, 1])
-    assert counter.n < n_chunks, (
-        f"{counter.n} tasks for one frame of a {n_chunks}-chunk array: the whole thing was evaluated"
+    # A frame of this array is 6 chunks, and the coords cost a little on top. The budget is set
+    # just above what one frame actually needs rather than merely below the whole array: at
+    # n_chunks it would take a 200-fold regression to notice, which is no guard at all.
+    assert counter.n <= 30, (
+        f"{counter.n} tasks for one frame of a {n_chunks}-chunk array: far more than one frame"
     )
 
 
