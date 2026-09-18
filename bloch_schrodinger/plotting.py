@@ -934,7 +934,7 @@ def create_map(
     n_dims = len(spatial_dims)
     
     spatial_plot = isinstance(cart_axes[0], int) or isinstance(cart_axes[1], int)
-    
+    factors = _cart_factors(data, frame)
     dim1 = coord_names[cart_axes[0]] if isinstance(cart_axes[0], int) else cart_axes[0]
     dim2 = coord_names[cart_axes[1]] if isinstance(cart_axes[1], int) else cart_axes[1]
 
@@ -942,10 +942,21 @@ def create_map(
     # one, because there is no common one to speak of: it changes with the sliders. pcolormesh takes
     # the 2D X,Y mesh directly, so this handles any axis order and any number of dims on its own, and
     # it draws a skewed lattice as the skewed cells it really is rather than smoothing over them.
-    moving = bool(_moving_dims(data, dim1, spatial_dims))
+    moving = bool(_moving_dims(data, dim1, spatial_dims, factors)) and spatial_dims
     ortho = not moving and (cart_axes != [0, 1] or n_dims != 2)
+    native = moving
+    
     if ortho:
-        data = _to_orthogonal(data, spatial_dims, resolution)
+        # An axis-aligned lattice is already a cartesian grid wearing lattice labels, so getting
+        # to x, y, z is a relabelling and not an interpolation. Taking it exactly costs nothing and
+        # leaves everything downstream -- slider names, their physical values, the transposes --
+        # exactly as it was. Only a genuinely skewed lattice, where the cartesian and lattice axes
+        # really do mix, is worth interpolating.
+        aligned = _aligned_axes(data, spatial_dims)
+        if aligned is None:
+            data = _to_orthogonal(data, spatial_dims, resolution)
+        else:
+            data = _relabel_cartesian(data, spatial_dims, aligned)
 
     if spatial_plot:
         if moving:
