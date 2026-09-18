@@ -973,6 +973,20 @@ def create_map(
     # each other whatever order 'cart_axes' asked for
     mesh_dims = [d for d in data.dims if d in plotted_dims]
 
+    # pcolormesh indexes C as (Y, X). 'ortho' relabels the dims to x, y and 'native' reorders
+    # them onto the mesh, so each of those paths guarantees that order by itself. A static
+    # axis-aligned lattice drawn on its own a1, a2 dims guarantees nothing -- the field keeps
+    # whatever order it was built in -- so the order is read back off the coordinates.
+
+    gather = [dim for dim in _cart_dims(data, dim2, factors)]
+    gather += [dim for dim in _cart_dims(data, dim1, factors) if dim not in gather]
+
+    flat_dims = (
+        None
+        if (ortho or native)
+        else (gather[0], gather[1])
+    )
+
     def mesh_at(sel: dict) -> tuple[xr.DataArray, xr.DataArray]:
         """The cartesian mesh the field is drawn on, at one position of the sliders."""
         out = []
@@ -1009,6 +1023,8 @@ def create_map(
         plot_init = plot_init.transpose(dim2, dim1)
     elif native:
         plot_init = plot_init.transpose(*mesh_dims)
+    else:
+        plot_init = plot_init.transpose(*flat_dims)
 
     obj = func(ax, X, Y, plot_init, **template["fkwargs"])
     if moving and not cst_bds:
@@ -1051,6 +1067,8 @@ def create_map(
             new_plot = new_plot.transpose(dim2, dim1)
         elif native:
             new_plot = new_plot.transpose(*mesh_dims)
+        else:
+            new_plot = new_plot.transpose(*flat_dims)
 
         # On a moving grid the mesh itself has to be rebuilt, so the artist cannot be updated in
         # place even for a pcolormesh: its geometry, not just its values, is what changed. An
@@ -1246,6 +1264,16 @@ def create_quiver(
 
     mesh_dims = [d for d in dataU.dims if d in plotted_dims]
 
+    # pcolormesh indexes C as (Y, X). 'ortho' relabels the dims to x, y and 'native' reorders
+    # them onto the mesh, so each of those paths guarantees that order by itself. A static
+    # axis-aligned lattice drawn on its own a1, a2 dims guarantees nothing -- the field keeps
+    # whatever order it was built in -- so the order is read back off the coordinates.
+    flat_dims = (
+        None
+        if (ortho or moving)
+        else (_cart_dims(dataU, dim2, {})[0], _cart_dims(dataU, dim1, {})[0])
+    )
+
     def mesh_at(sel: dict) -> tuple[xr.DataArray, xr.DataArray]:
         """The arrow positions, at one position of the sliders."""
         out = []
@@ -1288,6 +1316,9 @@ def create_quiver(
     elif moving:
         plot_init_U = plot_init_U.transpose(*mesh_dims)
         plot_init_V = plot_init_V.transpose(*mesh_dims)
+    else:
+        plot_init_U = plot_init_U.transpose(*flat_dims)
+        plot_init_V = plot_init_V.transpose(*flat_dims)
 
     obj = func(
         ax,
@@ -1333,6 +1364,9 @@ def create_quiver(
         elif moving:
             new_plot_U = new_plot_U.transpose(*mesh_dims)
             new_plot_V = new_plot_V.transpose(*mesh_dims)
+        else:
+            new_plot_U = new_plot_U.transpose(*flat_dims)
+            new_plot_V = new_plot_V.transpose(*flat_dims)
 
         # On a moving grid the arrows sit at new positions as well as carrying new values
         newX, newY = mesh_at(sel) if moving else (X, Y)
