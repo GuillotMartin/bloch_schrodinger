@@ -419,8 +419,12 @@ class Wannier:
         
         if self.n_wannier[1] == 1:
             eigve = eigve.expand_dims('band')
-        
+            eigva = eigva.expand_dims('band')
+
         self.eigve = eigve.transpose(..., 'band', *self.kb_dims, *self.spatial_dims).rename({'band':'m'})[{'m':slice(self.n_wannier[0], None)}]
+        # The energies are kept as well: together with U_mnk they give the Hamiltonian in the Wannier
+        # basis, U^dagger.diag(E).U at every k-point, see 'WannierHamiltonianBuilder'
+        self.eigva = eigva.transpose(..., 'band', *self.kb_dims).rename({'band':'m'})[{'m':slice(self.n_wannier[0], None)}]
 
     @staticmethod
     def _inner(A: xr.DataArray, B: xr.DataArray) -> float:
@@ -558,8 +562,29 @@ class Wannier:
         return U0
 
 
+    @staticmethod
+    def _flatten(paramcoords: dict) -> list[dict]:
+        """Flatten a parameter space into the list of its points.
+
+        Args:
+            paramcoords (dict): The parameter coordinates, as {dim: 1D coordinate}.
+
+        Returns:
+            list[dict]: One {dim: value} selection per point, or [{}] if there are no parameters.
+        """
+        indexes = [np.arange(coord.shape[0]) for coord in paramcoords.values()]
+        indexGrid = np.meshgrid(*indexes, indexing="ij")
+        indexGrid = [grid.reshape(-1) for grid in indexGrid]
+        selections = [
+            {
+                dim:paramcoords[dim][tup[i]].item() for i, dim in enumerate(paramcoords)
+            }
+            for tup in zip(*indexGrid)
+        ]
+        return selections if len(selections) > 0 else [{}]
+
     def solve(
-        self, 
+        self,
         n_wannier: Union[int, tuple[int, int]],
         centers:list[list[float]],
         parallel: bool = False,
@@ -626,20 +651,7 @@ class Wannier:
             coords = allcoords
         )
         
-        # Flattening parameter space
-        indexes = [np.arange(coord.shape[0]) for coord in paramcoords.values()]
-        indexGrid = np.meshgrid(*indexes, indexing="ij")
-        indexGrid = [grid.reshape(-1) for grid in indexGrid]
-        selections = [
-            {
-                dim:paramcoords[dim][tup[i]].item() for i, dim in enumerate(paramcoords)
-            } 
-            for tup in zip(*indexGrid)
-        ]
-        
-        if len(selections) == 0:
-            selections = [{}]
-        
+        selections = self._flatten(paramcoords)
         n_tot = len(selections)
                 
         # One generator per parameter point, all derived from the one seed, so that a run is
@@ -688,6 +700,40 @@ class Wannier:
         )
 
         return U_tot_mnk
+
+    def centers(self, U_mnk: xr.DataArray, verbose: bool = True) -> xr.DataArray:
+        """Compute the centers of the WFs defined by a given unitary matrix, from the Berry phases of the
+        overlap matrices (Marzari-Vanderbilt eq. 31), without building the real-space profiles.
+
+        Args:
+            U_mnk (xr.DataArray): The unitary matrix, as returned by 'solve'.
+            verbose (bool, optional): Whether to plot a progress bar over the parameter space. Defaults to True.
+
+        Returns:
+            xr.DataArray: The cartesian position of each WF center, with dimensions (..., 'n', 'axis').
+        """
+        paramcoords = {
+            dim: U_mnk.coords[dim] for dim in U_mnk.dims
+            if dim not in ['m', 'n', *self.kb_dims]
+        }
+        selections = self._flatten(paramcoords)
+
+        centers = xr.DataArray(
+            np.zeros((*[c.shape[0] for c in paramcoords.values()], U_mnk.sizes['n'], self.n_dims)),
+            coords={
+                **paramcoords,
+                'n': U_mnk.coords['n'].values,
+                'axis': self.coord_names,
+            },
+        )
+
+        for sel in bar(selections, desc="Computing Wannier centers", unit="set", verbose=verbose):
+            M = self.new_M(U_mnk.sel(sel).transpose('m', 'n', *self.kb_dims), self.M_mnkb(self.eigve.sel(sel)))
+            # This package writes the Bloch functions as exp(-ik.r).u_k (see the kinetic operators of the
+            # solvers), the opposite of the Marzari-Vanderbilt convention, which flips the sign of r_n
+            centers.loc[sel] = -self.r_n(M).transpose(..., 'kxy').values
+
+        return centers
 
     def compute_wannier(
         self,
