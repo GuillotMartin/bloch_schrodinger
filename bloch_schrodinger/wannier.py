@@ -423,7 +423,7 @@ class Wannier:
 
         self.eigve = eigve.transpose(..., 'band', *self.kb_dims, *self.spatial_dims).rename({'band':'m'})[{'m':slice(self.n_wannier[0], None)}]
         # The energies are kept as well: together with U_mnk they give the Hamiltonian in the Wannier
-        # basis, U^dagger.diag(E).U at every k-point, see 'WannierHamiltonianBuilder'
+        # basis, U^dagger.diag(E).U at every k-point
         self.eigva = eigva.transpose(..., 'band', *self.kb_dims).rename({'band':'m'})[{'m':slice(self.n_wannier[0], None)}]
 
     @staticmethod

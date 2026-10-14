@@ -12,7 +12,6 @@ This folder contains the package's Jupyter tutorials. They are meant to be read 
 8. [CouplingAPI.ipynb](CouplingAPI.ipynb) — the low-level coupling API used to build custom multi-field couplings like TE/TM.
 9. [PlaneWaveSolver.ipynb](PlaneWaveSolver.ipynb) — the `PWSolver` class, a fast alternative to `FDSolver` for smooth potentials.
 10. [Wannier.ipynb](Wannier.ipynb) — maximally localized Wannier functions, builds on `PWSolver`.
-11. [WannierTightBinding.ipynb](WannierTightBinding.ipynb) — tight-binding models computed from a continuous potential, the `WannierHamiltonianBuilder` class. Builds on `Wannier.ipynb` and `tightbinding.ipynb`, and requires the external `tightbinding` package.
 
 ## Reference
 

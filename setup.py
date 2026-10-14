@@ -46,8 +46,6 @@ REQUIRED = [
 # What packages are optional?
 EXTRAS = {
     'dev': ['pytest'],
-    # For the 'wannier_tb' module, which builds tight-binding models with the 'tightbinding' package
-    'tb': ['tightbinding @ git+https://github.com/GuillotMartin/tightbinding'],
 }
 
 # The rest you shouldn't have to touch too much :)
